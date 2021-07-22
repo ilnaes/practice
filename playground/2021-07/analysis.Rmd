@@ -1,0 +1,488 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(forcats)
+library(lubridate)
+library(DataExplorer)
+library(skimr)
+library(corrr)
+library(GGally)
+library(fpp3)
+```
+
+```{r}
+set.seed(80085)
+
+df <- read_csv("2021-07/train.csv") %>%
+  mutate(
+    target_carbon_monoxide = log1p(target_carbon_monoxide),
+    target_benzene = log1p(target_benzene),
+    target_nitrogen_oxides = log1p(target_nitrogen_oxides)
+  )
+split <- initial_split(df)
+train <- training(split)
+test <- testing(split)
+folds <- vfold_cv(train, v = 5)
+
+mset <- metric_set(rmse)
+grid_control <- control_grid(
+  save_pred = TRUE,
+  save_workflow = TRUE,
+  verbose = TRUE,
+  extract = extract_model
+)
+
+train %>% View()
+```
+
+```{r}
+train <- train %>%
+  mutate(
+    date = as_date(date_time),
+    hour = hour(date_time),
+    day = wday(date_time),
+    cluster = sensor_4 < 200 + sensor_1 / 2
+  )
+
+train %>% 
+  mutate(hour = (hour + 20) %% 24) %>% 
+  pivot_longer(starts_with("target"), names_to = "type", values_to = "val") %>% 
+  group_by(weekend = day %in% c(0,6), hour, type) %>% 
+  mutate(mean = mean(val)) %>% 
+  ggplot(aes(hour, mean)) +
+  geom_line(aes(color = weekend)) +
+  facet_grid(rows = vars(type), scales = 'free_y')
+```
+
+
+
+```{r}
+rec <- recipe(target_benzene ~ hour, data = train) %>% 
+  step_mutate(hour = (hour + 20) %% 24) %>% 
+  step_ns(hour, deg_free = 4)
+
+rec %>% 
+  prep() %>% 
+  juice()
+
+model <- linear_reg() %>% 
+  set_engine('lm')
+
+workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(model) %>% 
+  fit(train) %>% 
+  augment(train) %>% 
+  group_by(hour) %>% 
+  summarize(mean = mean(target_benzene),
+            pred = mean(.pred)) %>% 
+  ggplot(aes(x = hour)) +
+  geom_line(aes(y = mean), color = 'blue') +
+  geom_line(aes(y = pred), color = 'red')
+```
+
+
+
+```{r}
+skim(train)
+```
+
+```{r}
+rmses <- c(sd(train$target_benzene), sd(train$target_carbon_monoxide), sd(train$target_nitrogen_oxides))
+rmses
+mean(rmses)
+```
+
+### Naive score: 0.693
+### RMSEs: Benzene - 0.76, CO - 0.43, NO - 0.88
+
+```{r}
+train %>%
+  select(starts_with("sensor"), deg_C, relative_humidity, absolute_humidity, starts_with("target")) %>%
+  ggpairs()
+```
+
+## One feature for when sensors might be off: sensor_4 < 200 + sensor_1/2
+
+```{r}
+train %>%
+  ggplot(aes(sensor_1, sensor_4)) +
+  geom_point(aes(color = target_carbon_monoxide)) +
+  geom_abline(intercept = 200, slope = 0.5)
+
+train <- train %>%
+  mutate(cluster = sensor_4 < 200 + sensor_1 / 2)
+
+train %>%
+  ggplot(aes(sensor_2, cluster)) +
+  geom_jitter()
+
+train %>%
+  ggplot(aes(absolute_humidity, target_carbon_monoxide)) +
+  geom_point(aes(color = cluster))
+
+train %>%
+  ggplot(aes(sensor_2, target_benzene)) +
+  geom_point(aes(color = cluster))
+```
+
+### Seems like humidities might be better when sensors are off
+
+```{r}
+train %>%
+  filter(cluster == TRUE) %>%
+  select(-date_time, -cluster) %>%
+  ggpairs()
+```
+
+```{r}
+train %>%
+  filter(cluster == TRUE) %>%
+  group_by(as_date(date_time)) %>%
+  count()
+```
+
+```{r}
+train %>% 
+  select(date_time) %>% 
+  mutate(hour = hour(date_time))
+
+train %>%
+  mutate(dow = wday(date),
+         hour = (hour(date_time) + 18) %% 24) %>% 
+  group_by(hour) %>%
+  # group_by(date) %>%
+  summarize(
+    mean_b = mean(target_benzene),
+    mean_n = mean(target_nitrogen_oxides),
+    mean_c = mean(target_carbon_monoxide),
+    # mean_p = mean(cluster)
+  ) %>% 
+  pivot_longer(starts_with("mean"), names_to = "type", values_to = "val") %>%
+  ggplot(aes(hour, val)) +
+  geom_line() +
+  facet_grid(rows = vars(type), scales = "free_y")
+
+train %>% 
+  as_tsibble(index = date_time) %>%
+  filter(month(date_time) %in% 5) %>% 
+  mutate(`5-MA` = slider::slide_dbl(target_benzene, mean,
+                .before = 24, .after = 0, .complete = TRUE)) %>% 
+  autoplot(`5-MA`)
+```
+
+
+
+
+## Carbon_monoxide
+
+```{r}
+train %>%
+  ggplot(aes(sensor_2, sensor_5)) +
+  geom_point(aes(color = cluster))
+
+train %>%
+  ggplot(aes(sensor_1, sensor_4)) +
+  geom_point(aes(color = target_carbon_monoxide)) +
+  geom_abline(intercept = 200, slope = 0.5)
+
+train %>%
+  pivot_longer(c(starts_with("sensor"), deg_C, ends_with("humidity")), names_to = "sensor", values_to = "val") %>%
+  ggplot(aes(val, target_carbon_monoxide)) +
+  geom_point(aes(color = cluster)) +
+  facet_wrap(vars(sensor), scales = "free_x")
+
+train %>%
+  filter(cluster == 1) %>%
+  pivot_longer(c(starts_with("sensor"), deg_C, ends_with("humidity")), names_to = "sensor", values_to = "val") %>%
+  ggplot(aes(val, target_carbon_monoxide)) +
+  geom_point() +
+  facet_wrap(vars(sensor), scales = "free_x")
+```
+
+```{r}
+carbon_sens_rec <- recipe(target_carbon_monoxide ~ sensor_1 + sensor_2 + sensor_3 + sensor_4 + sensor_5, data = train) %>%
+  step_filter(sensor_4 > 200 + sensor_1 / 2)
+
+carbon_model <- linear_reg() %>%
+  set_engine("lm")
+
+carbon_sens_workflow <- workflow() %>%
+  add_recipe(carbon_sens_rec) %>%
+  add_model(carbon_model)
+
+res <- carbon_sens_workflow %>%
+  fit_resamples(folds, metrics = mset, control = grid_control)
+
+res %>%
+  collect_metrics()
+```
+
+```{r}
+carbon_sens_workflow %>%
+  finalize_workflow(select_best(res, "rmse")) %>%
+  fit(data = train) %>%
+  augment(test) %>%
+  with(rmse_vec(.pred, target_carbon_monoxide))
+```
+
+--- 0.430 Naive
+--- 0.184 cluster 0 + every sensor
+
+## Benzene
+
+```{r}
+train %>%
+  ggplot(aes(sensor_2, target_benzene)) +
+  geom_point()
+```
+
+```{r}
+benzene_rec <- recipe(target_benzene ~ sensor_2 + sensor_3
+  # + sensor_1 + sensor_4 + sensor_5
+  ,
+  data = train
+) %>%
+  step_log(sensor_2)
+
+benzene_rec %>%
+  prep() %>%
+  juice() %>%
+  ggplot(aes(sensor_2, target_benzene)) +
+  geom_point()
+
+benzene_model <- linear_reg() %>%
+  set_engine("lm")
+
+benzene_workflow <- workflow() %>%
+  add_recipe(benzene_rec) %>%
+  add_model(benzene_model)
+
+res <- benzene_workflow %>%
+  fit_resamples(folds, metrics = mset, control = grid_control)
+
+res %>%
+  collect_metrics()
+```
+
+```{r}
+benzene_workflow %>%
+  finalize_workflow(select_best(res, "rmse")) %>%
+  fit(train) %>%
+  augment(test) %>%
+  with(rmse_vec(.pred, target_benzene))
+```
+
+- 0.106 --- Just sensor 2 with log transform
+- 0.102 --- + sensor 3
+- 0.102 --- + filter out bad cluster
+
+
+```{r}
+resids <- benzene_workflow %>%
+  fit(train) %>%
+  augment(train) %>%
+  mutate(residual = target_benzene - .pred)
+
+resids %>%
+  select(-starts_with("target"), -sensor_2, -date_time) %>%
+  correlate() %>%
+  select(term, residual) %>%
+  filter(!is.na(residual)) %>%
+  mutate(term = fct_reorder(term, residual)) %>%
+  ggplot(aes(residual, term)) +
+  geom_col()
+
+resids %>%
+  ggplot(aes(sensor_3, residual)) +
+  geom_point()
+```
+
+### Nitrogen oxides
+
+```{r}
+train %>%
+  filter(cluster == 0) %>%
+  pivot_longer(c(starts_with("sensor"), deg_C, ends_with("humidity")), names_to = "sensor", values_to = "val") %>%
+  ggplot(aes(val, target_nitrogen_oxides)) +
+  geom_point() +
+  facet_wrap(vars(sensor), scales = "free_x")
+
+doParallel::registerDoParallel(cores = 1)
+```
+
+```{r}
+NO_sens_rec <- recipe(target_nitrogen_oxides ~ sensor_1 + sensor_2 + sensor_3 + sensor_4 + sensor_5
+  + date_time +
+  +relative_humidity + absolute_humidity + deg_C, data = train) %>%
+  step_filter(sensor_4 > 200 + sensor_1 / 2) %>% 
+  step_mutate(weekend = wday(date_time) %in% c(0,6)) %>% 
+  step_mutate(sept = month(date_time) > 8) %>% 
+  step_rm(date_time)
+
+NO_model <- linear_reg() %>%
+  set_engine("lm")
+
+NO_xgboost_model <- boost_tree(mode = "regression", learn_rate = tune(), trees = tune(), mtry = tune()) %>%
+  set_engine("xgboost")
+
+NO_sens_workflow <- workflow() %>%
+  add_recipe(NO_sens_rec) %>%
+  add_model(NO_xgboost_model)
+
+NO_res <- NO_sens_workflow %>%
+  # fit_resamples(folds, metrics = mset, control = grid_control)
+  tune_grid(folds, metrics = mset, control = grid_control, grid = crossing(
+    learn_rate = c(0.1, 0.3, 0.03),
+    mtry = c(2),
+    trees = seq(100, 500, 50)
+  ))
+```
+
+```{r}
+autoplot(NO_res)
+```
+
+```{r}
+NO_sens_workflow %>%
+  finalize_workflow(select_best(NO_res, "rmse")) %>%
+  fit(data = train) %>%
+  augment(test) %>%
+  with(rmse_vec(.pred, target_nitrogen_oxides))
+```
+
+--- 0.88 - Naive
+--- 0.43 - lm + sensors
+--- 0.392 - xgb sensors + tuned
+--- 0.381 -     + everything tuned
+--- 0.319 -     + date (tuned + mtry)
+
+
+```{r}
+holdout <- read_csv("2021-07/test.csv")
+holdout <- benzene_workflow %>%
+  fit(df) %>%
+  augment(holdout) %>%
+  rename(target_benzene = .pred)
+
+holdout_sensor <- holdout %>% filter(sensor_4 > 200 + sensor_1 / 2)
+holdout_no_sensor <- holdout %>%
+  filter(sensor_4 <= 200 + sensor_1 / 2) %>%
+  mutate(
+    target_carbon_monoxide = mean(df$target_carbon_monoxide),
+    target_nitrogen_oxides = mean(df$target_nitrogen_oxides)
+  )
+```
+
+```{r}
+NO_sensor_holdout <- NO_sens_workflow %>%
+  finalize_workflow(select_best(NO_res, "rmse")) %>%
+  fit(df) %>%
+  augment(holdout_sensor) %>%
+  rename(target_nitrogen_oxides = .pred)
+
+final_sensor <- carbon_sens_workflow %>%
+  fit(df) %>%
+  augment(NO_sensor_holdout) %>%
+  rename(target_carbon_monoxide = .pred)
+```
+
+```{r}
+final <- bind_rows(final_sensor, holdout_no_sensor) %>%
+  select(date_time, starts_with("target")) %>%
+  mutate(
+    target_benzene = expm1(target_benzene),
+    target_carbon_monoxide = expm1(target_carbon_monoxide),
+    target_nitrogen_oxides = expm1(target_nitrogen_oxides),
+  )
+
+final
+
+final %>%
+  write_csv("attempt2.csv")
+```
+
+```{r}
+read_csv("2021-07/test.csv") %>%
+  with(mean(sensor_4 < 200 + sensor_1 / 2))
+
+train %>%
+  with(mean(sensor_4 < 200 + sensor_1 / 2))
+```
+
+
+
+
+
+```{r}
+train %>%
+  filter(cluster == 1) %>%
+  pivot_longer(c(starts_with("sensor"), deg_C, ends_with("humidity")), names_to = "sensor", values_to = "val") %>%
+  ggplot(aes(val, target_carbon_monoxide)) +
+  geom_point() +
+  facet_wrap(vars(sensor), scales = "free_x")
+
+train %>%
+  filter(cluster == 1) %>%
+  select(-target_benzene, -target_nitrogen_oxides, -date_time, -cluster) %>%
+  correlate() %>%
+  select(term, target_carbon_monoxide) %>%
+  head(8) %>%
+  mutate(term = fct_reorder(term, target_carbon_monoxide)) %>%
+  ggplot(aes(target_carbon_monoxide, term)) +
+  geom_col()
+
+sd(train %>% filter(cluster == 1) %>% pull(target_carbon_monoxide))
+
+train %>%
+  filter(cluster == 1) %>%
+  ggplot(aes(relative_humidity, absolute_humidity)) +
+  geom_point(aes(color = target_carbon_monoxide))
+```
+
+```{r}
+carbon_no_rec <- recipe(target_carbon_monoxide ~ sensor_1 + sensor_4, data = train) %>%
+  step_filter(sensor_4 <= 200 + sensor_1 / 2) %>%
+  step_rm(sensor_1, sensor_4)
+
+carbon_model <- linear_reg() %>%
+  set_engine("lm")
+
+carbon_xgboost_model <- boost_tree(mode = "regression", learn_rate = tune(), trees = tune()) %>%
+  set_engine("xgboost")
+
+carbon_no_workflow <- workflow() %>%
+  add_recipe(carbon_no_rec) %>%
+  # add_model(carbon_xgboost_model)
+  add_model(carbon_model)
+
+res <- carbon_no_workflow %>%
+  fit_resamples(folds, metrics = mset, control = grid_control)
+# tune_grid(folds, metrics = mset, control = grid_control, grid = crossing(
+#   learn_rate = c(0.003, 0.01),
+#   trees = seq(50, 400, 50)
+# ))
+
+res %>%
+  collect_metrics()
+```
+
+```{r}
+autoplot(res)
+```
+
+```{r}
+carbon_no_workflow %>%
+  finalize_workflow(select_best(res, "rmse")) %>%
+  fit(data = train)
+```
+
+```{r}
+carbon_no_workflow %>%
+  finalize_workflow(select_best(res, "rmse")) %>%
+  fit(data = train) %>%
+  augment(test) %>%
+  with(rmse_vec(.pred, target_carbon_monoxide))
+```
+
+--- 0.443 cluster 0 + Naive (no improvments otherwise)

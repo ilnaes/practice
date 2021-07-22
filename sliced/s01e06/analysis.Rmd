@@ -1,0 +1,131 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(lubridate)
+library(skimr)
+```
+
+```{r}
+set.seed(42069)
+df <- read_csv("train.csv") %>%
+  mutate(
+    date = ymd(paste(Year, Month, "1", sep = "-")),
+    Hours_watched = log(Hours_watched),
+  ) %>%
+  select(-Year, -Month)
+
+split <- initial_split(df)
+train <- training(split)
+test <- testing(split)
+
+folds <- vfold_cv(train, v = 5)
+mset <- metric_set(mae)
+```
+
+```{r}
+skim(train)
+```
+
+Hours_streamed is very predictive of Hours_watched, but in a nonlinear way.
+Breakpoint is about 20000
+
+```{r}
+train %>%
+  mutate(x = Hours_watched - Hours_Streamed * Avg_viewer_ratio) %>%
+  ggplot(aes(x)) +
+  geom_histogram()
+```
+
+```{r}
+train_ratio %>%
+  ggplot(aes(Hours_Streamed, Hours_watched)) +
+  geom_point() +
+  geom_vline(xintercept = 20000, color = "red") +
+  scale_x_log10() +
+  scale_y_log10()
+```
+
+```{r}
+rec <- recipe(Hours_watched ~ Hours_Streamed + Avg_viewer_ratio
+  + Peak_channels + Peak_viewers, data = train) %>%
+  step_log(all_numeric_predictors()) %>%
+  step_relu(Hours_Streamed, shift = 10)
+
+lin_model <- linear_reg() %>%
+  set_engine("lm")
+
+lin_workflow <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(lin_model)
+
+res <- lin_workflow %>%
+  tune_grid(folds, metrics = mset, grid = crossing(
+    threshold = c(0.3, 0.1, 0.03, 0.01)
+  ))
+
+res %>%
+  collect_metrics()
+```
+
+```{r}
+result <- lin_workflow %>%
+  finalize_workflow(select_best(res, 'mae')) %>% 
+  fit(train) %>% 
+  augment(train) %>%
+  mutate(residual = Hours_watched - .pred)
+
+result %>%
+  ggplot(aes(Hours_watched, residual)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+result %>%
+  ggplot(aes(log(Peak_viewers), log(Peak_channels))) +
+  geom_point(aes(color = residual), alpha = 0.5)
+
+result %>%
+  mutate(Game = fct_lump(Game, w = Hours_watched, n = 10)) %>%
+  filter(Game != "Other") %>%
+  ggplot(aes(.pred, residual)) +
+  geom_point(aes(color = Game))
+
+result %>%
+  ggplot(aes(Hours_watched, Hours_watched - .pred)) +
+  geom_point(aes(color = log(Peak_viewers)), alpha = 0.5)
+
+res %>%
+  augment(train) %>%
+  ggplot(aes(x = Hours_Streamed)) +
+  geom_point(aes(y = Hours_watched, color = log(Avg_viewer_ratio))) +
+  geom_point(aes(y = .pred), color = "blue") +
+  scale_x_log10() +
+  scale_y_log10()
+
+train %>%
+  ggplot(aes(log(Hours_Streamed), log(Hours_watched))) +
+  geom_point() +
+  geom_abline(intercept = 7, slope = 0.66, color = "blue") +
+  geom_vline(xintercept = 10, color = "red")
+```
+
+```{r}
+lin_workflow %>%
+  finalize_workflow(select_best(res, 'mae')) %>% 
+  fit(train) %>% 
+  augment(read_csv("test.csv")) %>%
+  mutate(Rank = rank(-.pred)) %>%
+  arrange(Rank) %>% 
+  select(Game, Rank)
+# %>%
+#   write_csv("attempt4.csv")
+
+temp$.pred[order(temp$.pred)]
+temp$.pred[order(temp$.pred, decreasing = TRUE)]
+```
+
+```{r}
+train %>%
+  group_by(Game) %>%
+  summarize(mean = mean(Hours_watched)) %>%
+  (desc(mean))
+```

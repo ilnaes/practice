@@ -1,0 +1,304 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(textrecipes)
+library(skimr)
+library(lubridate)
+library(forcats)
+library(corrr)
+
+doParallel::registerDoParallel(cores = 1)
+```
+
+```{r}
+set.seed(42069)
+preprocess <- function(df, train = TRUE) {
+  temp <- df %>%
+    mutate(
+      last_review = ymd(last_review),
+      last_dt = as.integer(last_review)
+    ) %>%
+    rename(
+      nbhd = neighbourhood,
+      nbhd_group = neighbourhood_group
+    )
+
+  if (train) {
+    temp %>% mutate(
+      price = log1p(price)
+    )
+  } else {
+    temp
+  }
+}
+df <- read_csv("train.csv") %>%
+  preprocess()
+split <- initial_split(df)
+train <- training(split)
+test <- testing(split)
+
+train_fold <- vfold_cv(train)
+mset <- metric_set(rmse)
+```
+
+```{r}
+skim(train)
+train %>% View()
+```
+
+### Naive: Price --- 4.739, MSE --- 0.693
+
+```{r}
+sd(train$price)
+mean(train$price)
+```
+
+```{r}
+library(gender)
+train %>%
+  head(20) %>%
+  mutate(gender = map(host_name, gender))
+```
+
+```{r}
+train %>% 
+  ggplot(aes(reviews_per_month)) +
+  geom_histogram()
+```
+
+
+```{r}
+train %>%
+  group_by(nbhd_group) %>%
+  summarize(
+    mean = mean(price),
+    n = n()
+  ) %>%
+  ggplot(aes(mean, nbhd_group)) +
+  geom_point(aes(size = n)) +
+  xlim(0, 5.2)
+
+train %>%
+  group_by(room_type) %>%
+  summarize(
+    mean = mean(price),
+    n = n()
+  ) %>%
+  ggplot(aes(mean, room_type)) +
+  geom_point(aes(size = n)) +
+  xlim(0, 5.2)
+```
+
+```{r}
+train %>%
+  mutate(nbhd = fct_lump(nbhd, n = 15)) %>%
+  group_by(nbhd) %>%
+  summarize(
+    mean = mean(price),
+    n = n()
+  ) %>%
+  ggplot(aes(mean, nbhd)) +
+  geom_point(aes(size = n)) +
+  geom_vline(xintercept = 4.74, color = "red")
+```
+
+```{r}
+corr_tab <- train %>%
+  select(-id, -host_id) %>%
+  select_if(is.numeric) %>%
+  correlate()
+
+corr_tab %>%
+  shave() %>%
+  rplot()
+
+corr_tab %>%
+  select(term, price) %>%
+  filter(!is.na(price)) %>%
+  mutate(term = fct_reorder(term, price)) %>%
+  ggplot(aes(price, term)) +
+  geom_col()
+```
+
+```{r}
+train %>%
+  ggplot(aes(longitude, latitude)) +
+  geom_point(aes(alpha = 0.001))
+```
+
+```{r}
+train %>% filter(price == 0)
+```
+
+
+```{r}
+train %>%
+  filter(reviews_per_month < 10) %>%
+  ggplot(aes(reviews_per_month, price)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+train %>%
+  filter(reviews_per_month < 20) %>%
+  lm(formula = price ~ reviews_per_month) %>%
+  summary()
+
+train %>%
+  ggplot(aes(availability_365, price)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+train %>%
+  lm(formula = price ~ availability_365) %>%
+  summary()
+
+train %>%
+  ggplot(aes(calculated_host_listings_count, price)) +
+  geom_point(aes(alpha = 0.0001)) +
+  geom_smooth(method = "lm") +
+  geom_hline(yintercept = 4.739, color = "red")
+
+train %>%
+  lm(formula = price ~ calculated_host_listings_count) %>%
+  summary()
+
+train %>%
+  ggplot(aes(host_id, price)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+train %>%
+  ggplot(aes(reviews_per_month, price)) +
+  geom_point(aes(alpha = 0.001))
+
+train %>%
+  ggplot(aes(reviews_per_month, calculated_host_listings_count)) +
+  geom_point(aes(alpha = 0.001, color = price)) +
+  scale_color_gradient2(midpoint = 4.5)
+
+train %>%
+  count(host_name) %>%
+  arrange(desc(n))
+
+train %>%
+  filter(minimum_nights < 5) %>%
+  ggplot(aes(as.factor(minimum_nights), price)) +
+  geom_boxplot()
+```
+
+
+
+### Simple model
+- 0.693 --- naive
+- 0.516 --- room type + nbhd_group
+- 0.509 --- + longitude
+- 0.486 --- + nbhd (0.001 threshold)
+- 0.479 --- + reviews_per_month + availability
+- 0.454 --- + name (150 max_tokens)
+
+```{r}
+simple_rec <-
+  recipe(price ~ room_type + nbhd_group + longitude
+    + nbhd
+    + reviews_per_month
+    + availability_365
+    + name
+  # + number_of_reviews
+  # + latitude
+  # + minimum_nights
+  # + last_review
+  # + calculated_host_listings_count
+  ,
+  data = train
+  ) %>%
+  step_log(reviews_per_month, offset = 1) %>% 
+  step_impute_mean(all_numeric_predictors()) %>%
+  step_other(nbhd, threshold = 0.001) %>%
+  step_tokenize(name) %>%
+  step_stopwords(name) %>%
+  step_tokenfilter(name, max_tokens = 150) %>%
+  step_tf(name) %>%
+  step_dummy(all_nominal_predictors())
+
+# simple_rec %>%
+#   prep() %>%
+#   bake(new_data = NULL)
+```
+
+```{r}
+lin_model <- linear_reg() %>%
+  set_engine("lm")
+
+lin_workflow <- workflow() %>%
+  add_recipe(simple_rec) %>%
+  add_model(lin_model)
+
+res <- lin_workflow %>%
+  tune_grid(train_fold,
+    metrics = mset,
+    # grid = crossing(max_tokens = c(150,200,250)
+    #                 penalty = 10^seq(-7,-.5,.5))
+    # )
+  )
+
+collect_metrics(res)
+```
+
+```{r}
+autoplot(res)
+```
+
+```{r}
+rf_model <- rand_forest(mode = 'regression', mtry = 10, trees = 100, min_n = 7) %>% 
+  set_engine('ranger')
+
+rf_workflow <- workflow() %>%
+  add_recipe(simple_rec) %>%
+  add_model(rf_model)
+
+res <- rf_workflow %>%
+  fit_resamples(train_fold,
+    metrics = mset,
+    # grid = crossing(max_tokens = c(150,200,250)
+    #                 penalty = 10^seq(-7,-.5,.5))
+    # )
+  )
+
+collect_metrics(res)
+```
+
+
+### Eval on test set
+
+```{r}
+best_model <- res %>%
+  select_best()
+
+train_model <- lin_workflow %>%
+  finalize_workflow(best_model) %>%
+  fit(data = train)
+
+rmse_vec(predict(train_model, test)$.pred, test$price)
+```
+
+Make prediction
+
+```{r}
+best_model <- res %>%
+  select_best()
+
+final_model <- lin_workflow %>%
+  finalize_workflow(best_model) %>%
+  fit(data = df)
+
+submit <- read_csv("test.csv") %>%
+  preprocess(FALSE)
+
+final_model %>%
+  predict(submit) %>%
+  bind_cols(submit) %>%
+  select(id, price = .pred) %>%
+  mutate(price = exp(price) - 1) %>% 
+  write_csv(file = 'submit.csv')
+```
+

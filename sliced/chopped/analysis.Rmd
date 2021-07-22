@@ -1,0 +1,134 @@
+---
+title: "analysis"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(tidytext)
+library(forcats)
+library(textrecipes)
+data(stop_words)
+doParallel::registerDoParallel(cores = 2)
+```
+
+```{r}
+df <- readr::read_tsv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-08-25/chopped.tsv") %>% rename(rating = episode_rating)
+df
+```
+
+```{r}
+set.seed(42069)
+split <- initial_split(df %>% filter(!is.na(rating)))
+train <- training(split)
+test <- testing(split)
+```
+
+```{r}
+train %>% View()
+```
+
+
+```{r}
+ggplot(train, aes(series_episode, rating)) +
+  geom_point(aes(color = season)) +
+  geom_smooth(color = "red", method = "loess")
+```
+
+```{r}
+train %>%
+  mutate(food = paste(entree, appetizer, dessert)) %>%
+  unnest_tokens(word, food) %>%
+  anti_join(stop_words) %>%
+  mutate(word = fct_lump(word, n = 50)) %>%
+  filter(word != "Other") %>%
+  count(word, series_episode, rating) %>%
+  pivot_wider(c("series_episode", "rating"), names_from = word, values_from = n, values_fill = 0) %>%
+  select(-series_episode) %>%
+  lm(formula = rating ~ .) %>%
+  summary()
+```
+
+```{r}
+train %>%
+  unnest_tokens(word, episode_notes) %>%
+  anti_join(stop_words) %>%
+  mutate(word = fct_lump(word, n = 50)) %>%
+  filter(word != "Other") %>%
+  count(word, series_episode, rating) %>%
+  pivot_wider(c("series_episode", "rating"), names_from = word, values_from = n, values_fill = 0) %>%
+  select(-series_episode) %>%
+  lm(formula = rating ~ .) %>%
+  summary()
+```
+
+
+
+### Modeling
+```{r}
+mset <- metric_set(rmse)
+train_fold <- vfold_cv(train, v = 10)
+sd(train$rating)
+```
+
+
+```{r}
+model <- linear_reg(penalty = tune()) %>% set_engine("glmnet")
+
+rec <- recipe(rating ~ judge1 + judge2 + judge3, data = train) %>%
+  step_mutate(judge = paste(judge1, judge2, judge3, sep = "#")) %>%
+  step_tokenize(judge, token = "regex", options = list(pattern = "#")) %>%
+  step_tokenfilter(judge, max_tokens = tune()) %>%
+  step_tf(judge) %>%
+  step_rm(starts_with("judge"))
+
+fitted <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(model) %>%
+  tune_grid(train_fold, metrics = mset, grid = crossing(max_tokens = c(1,3,5,7), penalty = 10^seq(-7, -0.5, 0.5)))
+```
+
+```{r}
+fitted %>% 
+  autoplot()
+```
+
+
+```{r}
+rec <- recipe(rating ~ appetizer + entree + dessert, data = train) %>%
+  step_mutate(food = paste(appetizer, entree, dessert)) %>%
+  step_tokenize(food) %>%
+  step_tokenfilter(food, max_tokens = 20) %>%
+  step_stopwords(food) %>%
+  step_tf(food) %>%
+  step_rm(appetizer, entree, dessert)
+
+model <- linear_reg() %>% set_engine("lm")
+
+fitted <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(model) %>%
+  fit(data = train)
+
+predict(fitted, test)
+```
+
+
+```{r}
+lin_rec <- recipe(rating ~ series_episode, data = train) %>%
+  step_ns(series_episode, deg_free = 7)
+
+lin_model <- linear_reg() %>% set_engine("lm")
+
+lin_wf <- workflow() %>%
+  add_recipe(lin_rec) %>%
+  add_model(lin_model)
+
+tuned <- lin_wf %>%
+  tune_grid(train_fold, metrics = mset, grid = crossing(deg_free = 1:10))
+```
+
+```{r}
+tuned %>% collect_metrics()
+```

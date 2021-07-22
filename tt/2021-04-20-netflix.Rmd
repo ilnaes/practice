@@ -1,0 +1,151 @@
+```{r}
+library(tidyverse)
+library(tidytuesdayR)
+library(tidytext)
+library(lubridate)
+library(skimr)
+library(janitor)
+library(viridisLite)
+```
+
+```{r}
+df <- tt_load("2021-04-20")$netflix
+df <- df %>%
+  mutate(
+    date_added = parse_date(date_added, "%B %d, %Y"),
+    duration = as.numeric(str_extract(duration, "^\\d+"))
+  ) %>%
+  clean_names()
+```
+
+```{r}
+df %>% skim()
+```
+
+Cumsum of counts of programs by type
+
+```{r}
+test <- function(.df, ...) {
+  .df %>% select(...)
+}
+
+test(df, country, director)
+
+cumsum_by_year <- function(df, col) {
+  tmp <- df %>%
+    group_by(year(date_added), {{ col }}) %>%
+    count() %>%
+    ungroup() %>%
+    pivot_wider(names_from = {{ col }}, values_from = n) %>%
+    clean_names() %>%
+    rename(year = year_date_added) %>%
+    filter(!is.na(year)) %>%
+    replace(is.na(.), 0)
+
+  years <- tmp$year
+
+  tmp %>%
+    cumsum() %>%
+    mutate(year = years) %>%
+    pivot_longer(!year)
+}
+
+program_count <- df %>% cumsum_by_year(type)
+
+program_count %>%
+  ggplot(aes(year, value)) +
+  geom_line(aes(color = name))
+
+program_count %>%
+  ggplot(aes(year, value)) +
+  geom_area(aes(fill = name), position = "fill")
+```
+
+```{r}
+df %>%
+  unnest_tokens(country, country, token = "regex", pattern = ",") %>%
+  mutate(
+    country = str_trim(country),
+    country = fct_lump(country, 6)
+  ) %>%
+  cumsum_by_year(country) %>%
+  mutate(name = fct_reorder(name, -value)) %>%
+  ggplot(aes(year, value)) +
+  geom_area(aes(fill = name), position = "fill")
+
+
+df %>%
+  unnest_tokens(country, listed_in, token = "regex", pattern = ",") %>%
+  mutate(
+    country = str_trim(country),
+    country = fct_lump(country, 10)
+  ) %>%
+  cumsum_by_year(country) %>%
+  mutate(name = fct_reorder(name, -value)) %>%
+  ggplot(aes(year, value)) +
+  geom_area(aes(fill = name), position = "fill") +
+  scale_colour_brewer(type = "seq", palette = "Spectral")
+```
+
+
+```{r}
+movies <- df %>% filter(type == "Movie")
+
+movies %>% ggplot(aes(duration)) +
+  geom_freqpoly()
+```
+
+```{r}
+g5 <- c("united states", "united kingdom", "france", "japan", "india")
+
+df %>%
+  unnest_tokens(country, country, token = "regex", pattern = ",") %>%
+  unnest_tokens(genre, listed_in, token = "regex", pattern = ",") %>%
+  mutate(genre = str_trim(genre), country = str_trim(country)) %>%
+  filter(country %in% g5) %>%
+  mutate(genre = fct_lump(genre, 10)) %>%
+  count(country, genre) %>%
+  filter(!str_detect(genre, "^international")) %>%
+  pivot_wider(names_from = country, values_from = n) %>%
+  mutate_if(is.numeric, ~ . / sum(.)) %>%
+  pivot_longer(-genre) %>%
+  ggplot(aes(value, genre)) +
+  geom_col(aes(fill = name), position = "dodge")
+
+
+df %>%
+  unnest_tokens(genre, listed_in, token = "regex", pattern = ",") %>%
+  mutate(genre = str_trim(genre)) %>%
+  group_by(show_id) %>%
+  nest() %>%
+  mutate(total = sapply(data, function(df) nrow(df))) %>%
+  unnest(cols = c(data)) %>%
+  ungroup() %>%
+  filter(genre == "international tv shows") %>%
+  select(total) %>%
+  arrange(total)
+```
+
+```{r}
+df %>%
+  filter(!is.na(country)) %>%
+  mutate(home_country = ifelse(str_detect(country, "United States"), "US", "Other")) %>%
+  unnest_tokens(word, description) %>%
+  filter(
+    !str_detect(word, "^\\d"),
+    !(word %in% c("india", "england", "paris", "france", "japan", "japanese", "french", "london", "british"))
+  ) %>%
+  anti_join(stop_words) %>%
+  count(word, home_country) %>%
+  pivot_wider(names_from = home_country, values_from = n, values_fill = 0) %>%
+  filter(US > 5 & Other > 5) %>%
+  mutate_if(is.numeric, ~ (.) / sum(.)) %>%
+  mutate(ratio = log(US) - log(Other)) %>%
+  arrange(desc(ratio)) %>%
+  slice(-(6:(n() - 5))) %>%
+  mutate(word = fct_reorder(word, ratio)) %>%
+  ggplot(aes(ratio, word)) +
+  geom_col(aes(fill = ratio > 0))
+
+words[duplicated(words)]
+```

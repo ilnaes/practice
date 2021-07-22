@@ -1,0 +1,226 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(forcats)
+library(lubridate)
+library(corrr)
+library(skimr)
+library(vip)
+```
+
+```{r}
+set.seed(80085)
+df <- read_csv("train.csv") |>
+  mutate(attrition_flag = as.factor(attrition_flag))
+split <- initial_split(df)
+train <- training(split)
+test <- testing(split)
+
+folds <- vfold_cv(train, v = 5)
+
+mset <- metric_set(mn_log_loss)
+grid_control <- control_grid(
+  save_pred = TRUE,
+  save_workflow = TRUE,
+  extract = extract_model,
+  verbose = TRUE
+)
+```
+
+```{r}
+skim(train)
+
+train |> View()
+
+mn_log_loss_vec(as.factor(train$attrition_flag), rep(mean(train$attrition_flag), 5316))
+```
+
+```{r echo=TRUE}
+train
+```
+
+
+### Naive --- 1.60
+
+```{r}
+corrs <- train |>
+  mutate(
+    attrition_flag = as.integer(attrition_flag),
+    credit_limit = log1p(credit_limit)
+  ) |>
+  select_if(is.numeric) |>
+  select(-id) |>
+  correlate()
+
+corrs |>
+  rplot()
+
+corrs |>
+  select(term, val = attrition_flag) |>
+  tail(-1) |>
+  mutate(term = fct_reorder(term, val)) |>
+  ggplot(aes(term, val)) +
+  geom_col() +
+  coord_flip()
+```
+
+```{r}
+train |> with(mean(attrition_flag == 1))
+```
+
+
+### Average churn by categorical
+
+```{r}
+train |>
+  pivot_longer(c("gender", "education_level", "income_category"), names_to = "type", values_to = "val") |>
+  group_by(type, val) |>
+  summarize(p = mean(attrition_flag == 1), n = n()) |>
+  ggplot(aes(val, p)) +
+  geom_point(aes(size = n)) +
+  coord_flip() +
+  facet_grid(rows = vars(type), scales = "free_y")
+```
+
+### Plot histograms.
+Notes:
+* Credit limit looks right skewed
+* Transaction counts and utilization ratio looks multimodal (predict churn?)
+
+```{r}
+train |>
+  select_if(is.numeric) |>
+  select(-id) |>
+  pivot_longer(everything(), names_to = "type", values_to = "val") |>
+  ggplot(aes(val)) +
+  geom_density() +
+  facet_wrap(vars(type), scales = "free")
+
+train |>
+  ggplot(aes(avg_utilization_ratio)) +
+  geom_histogram() +
+  facet_wrap(vars(attrition_flag), scales = "free_y")
+
+train |>
+  ggplot(aes(total_trans_ct)) +
+  geom_histogram() +
+  facet_wrap(vars(attrition_flag), scales = "free_y")
+
+train |>
+  ggplot(aes(credit_limit)) +
+  geom_histogram() +
+  facet_wrap(vars(attrition_flag), scales = "free_y")
+
+train |>
+  group_by(months_inactive_12_mon) |>
+  summarize(p = mean(attrition_flag == 1)) |>
+  ggplot(aes(months_inactive_12_mon, p)) +
+  geom_point() +
+  coord_flip()
+
+train |>
+  group_by(total_relationship_count) |>
+  summarize(p = mean(attrition_flag == 1)) |>
+  ggplot(aes(total_relationship_count, p)) +
+  geom_point() +
+  coord_flip()
+```
+
+```{r}
+train |>
+  ggplot(aes(total_trans_ct, total_trans_amt)) +
+  geom_point(aes(color = attrition_flag))
+
+train |>
+  ggplot(aes(total_amt_chng_q4_q1, total_ct_chng_q4_q1)) +
+  geom_point(aes(color = attrition_flag), alpha = 0.5)
+```
+
+
+
+
+```{r}
+lin_rec <- recipe(attrition_flag
+~ gender + income_category + education_level
+  + total_trans_ct + months_inactive_12_mon + total_ct_chng_q4_q1 + total_revolving_bal
+  + avg_utilization_ratio + total_trans_amt + total_relationship_count + total_amt_chng_q4_q1,
+data = train
+) |>
+  step_dummy(all_nominal_predictors())
+# step_num2factor(months_inactive_12_mon, transform = \(x) x + 1, levels = map_chr(0:7, as.character)) |>
+# step_dummy(months_inactive_12_mon)
+
+# lin_rec |>
+#   prep() |>
+#   juice() |>
+#   glm(formula = attrition_flag ~ ., family = "binomial")
+
+lin_model <- logistic_reg() |>
+  # set_engine("glmnet")
+  set_engine("glm")
+
+xg_model <- boost_tree(mode = "classification", learn_rate = tune(), trees = tune(), mtry = tune()) |>
+  set_engine("xgboost")
+
+lin_workflow <- workflow() |>
+  add_recipe(lin_rec) |>
+  add_model(xg_model)
+
+res <- lin_workflow |>
+  tune_grid(folds, metrics = mset, control = grid_control, grid = crossing(
+    # penalty = 10^seq(-6, -.5, .5)
+    trees = seq(400, 1000, 50),
+    learn_rate = c(0.003, 0.01, 0.03),
+    mtry = c(5, 7, 9)
+  ))
+# fit_resamples(folds, metrics = mset, control = grid_control)
+```
+
+```{r}
+autoplot(res)
+```
+
+```{r}
+fitted <- lin_workflow |>
+  finalize_workflow(select_best(res, "mn_log_loss")) |>
+  fit(train)
+
+fitted |>
+  pull_workflow_fit() |>
+  vip()
+```
+
+
+
+### Linear models
+Results:
+* 0.29 - All categorical + numeric down to total revolving balance (not overfitting after check with glmnet)
+* 0.25 - Add all other categories (dummying months didn't help)
+
+### XGboost models
+Results:
+* 0.10 - All above + tuning
+
+```{r}
+mn_log_loss_vec(
+  test$attrition_flag,
+  lin_workflow |>
+    finalize_workflow(select_best(res, "mn_log_loss")) |>
+    fit(train) |>
+    predict(test, type = "prob") |>
+    pull(.pred_0)
+)
+```
+
+
+```{r}
+holdout <- read_csv("test.csv")
+
+lin_workflow |>
+  finalize_workflow(select_best(res, "mn_log_loss")) |>
+  fit(df) |>
+  predict(holdout, type = "prob") |>
+  bind_cols(holdout) |>
+  select(id, attrition_flag = .pred_1) |>
+  write_csv("attempt1.csv")
+```

@@ -1,0 +1,113 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(forcats)
+library(lubridate)
+library(skimr)
+```
+
+```{r}
+set.seed(80085)
+tt_data <- tidytuesdayR::tt_load("2021-07-13")
+df <- tt_data$scoobydoo |>
+  mutate(
+    imdb = as.numeric(imdb),
+    season = as.numeric(season),
+    just_about_wrapped_up = just_about_wrapped_up |> as.integer() |> as.logical()
+  ) |>
+  map_df(\(x) if (is.character(x) && n_distinct(x, na.rm = TRUE) == 3) {
+    as.logical(x)
+  } else {
+    x
+  }) |>
+  map_df(\(x) if (is.character(x) && max(nchar(x), na.rm = TRUE) == 4) {
+    as.integer(x)
+  } else {
+    x
+  })
+split <- initial_split(df)
+train <- training(split)
+test <- testing(split)
+folds <- vfold_cv(train, v = 5)
+```
+
+```{r}
+skim(train)
+View(train)
+```
+
+```{r}
+summarize_real <- function(df, ...) {
+  df |>
+    group_by(...) |>
+    summarize(mean = mean(as.logical(monster_real), na.rm = TRUE))
+}
+```
+
+```{r}
+train %>%
+  mutate(year = 10 * (year(date_aired) %/% 10)) |>
+  summarize_real(year) |>
+  ggplot(aes(year, mean)) +
+  geom_line() +
+  expand_limits(y = 0)
+```
+
+```{r}
+train |>
+  select(caught_fred:trap_work_first) |>
+  map_df(\(x) as.logical(x)) |>
+  bind_cols(train |> select(-(caught_fred:trap_work_first))) |>
+  mutate(
+    monster_real = as.logical(monster_real),
+    non_suspect = as.logical(monster_real),
+    arrested = as.logical(monster_real)
+  ) |>
+  skim()
+```
+
+```{r}
+train |>
+  filter(!is.na(just_about_wrapped_up)) |>
+  pull(just_about_wrapped_up) |>
+  map_int(as.integer) |>
+  map_lgl(as.logical)
+
+train |>
+  mutate(just_about_wrapped_up = just_about_wrapped_up |> as.integer() |> as.logical()) |>
+  map_df(\(x) if (is.character(x) && n_distinct(x, na.rm = TRUE) == 3) {
+    as.logical(x)
+  } else {
+    x
+  }) |>
+  map_df(\(x) if (is.character(x) && max(nchar(x), na.rm = TRUE) == 4) {
+    as.integer(x)
+  } else {
+    x
+  })
+```
+
+```{r}
+train |>
+  select_if(\(x) is.logical(x) || is.numeric(x)) |>
+  select(-index) |>
+  map_df(~ roc_auc_vec(as.factor(train$monster_real), as.numeric(.x))) |>
+  select(-monster_real) |>
+  pivot_longer(everything(), names_to = "type", values_to = "val") |>
+  mutate(
+    pos = val >= 0.5,
+    val = abs(val - 0.5),
+    type = fct_reorder(type, val)
+  ) |>
+  filter(val > .1) |>
+  ggplot(aes(type, val)) +
+  geom_col(aes(fill = pos)) +
+  coord_flip() +
+  labs(y = "absolute value of auc - 0.5")
+
+train |>
+  { \(x) select_if(x, map_lgl(x, is.double) | names(x) == "monster_real") }()
+
+train |>
+  {\(x) select_if(x, function(y) { print(y); is.numeric(y) || all(y == x$monster_real)} )}()
+```

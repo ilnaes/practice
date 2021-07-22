@@ -1,0 +1,166 @@
+---
+title: "TidyTemplate"
+date: 2021-04-17
+output: html_output
+---
+
+# TidyTuesday
+
+Join the R4DS Online Learning Community in the weekly #TidyTuesday event!
+Every week we post a raw dataset, a chart or article related to that dataset, and ask you to explore the data.
+While the dataset will be “tamed”, it will not always be tidy! As such you might need to apply various R for Data Science techniques to wrangle the data into a true tidy format.
+The goal of TidyTuesday is to apply your R skills, get feedback, explore other’s work, and connect with the greater #RStats community!
+As such we encourage everyone of all skills to participate!
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(tidytuesdayR)
+library(skimr)
+```
+
+# Load the weekly Data
+
+Dowload the weekly data and make available in the `tt` object.
+
+```{r Load}
+
+tt <- tt_load("2021-02-23")
+tt
+```
+
+
+# Readme
+
+Take a look at the readme for the weekly data to get insight on the dataset.
+This includes a data dictionary, source, and a link to an article on the data.
+
+```{r Readme, eval = interactive()}
+
+tt
+```
+
+
+# Glimpse Data
+
+Take an initial look at the format of the data available.
+
+```{r Glimpse}
+
+tt %>%
+  map(glimpse)
+```
+
+# Wrangle
+
+Explore the data and process it into a nice format for plotting! Access each dataset by name by using a dollarsign after the `tt` object and then the name of the data set.
+
+```{r Wrangle}
+
+earn <- tt$earn %>%
+  mutate(
+    date = ymd(sprintf("%d/%d/01", year, 3 * quarter - 2)),
+    race = fct_reorder(race, -median_weekly_earn)
+  )
+employed <- tt$employed
+
+skim(earn)
+skim(employed)
+
+demo <- c("Men", "Women", "White", "Black or African American", "Asian")
+
+employed %>% distinct(race_gender)
+employed %>%
+  distinct(industry) %>%
+  print(n = 30)
+
+employed %>%
+  filter(industry %in% demo) %>%
+  count()
+```
+
+
+# Visualize
+
+Using your processed dataset, create your unique visualization.
+
+```{r Visualize}
+
+library(lubridate)
+
+employed %>%
+  group_by(industry, race_gender) %>%
+  filter(industry %in% demo) %>%
+  count()
+
+employed_clean <- employed %>%
+  filter(!is.na(employ_n))
+
+skim(employed_clean)
+
+employed_clean %>%
+  filter(year == 2020) %>%
+  group_by(race_gender) %>%
+  summarize(total = sum(employ_n))
+
+earn %>%
+  filter(year == 2020 & race == "Asian" & sex == "Both Sexes" & quarter == 1) %>%
+  select(n_persons) %>%
+  sum()
+
+earn %>%
+  filter(race == "All Races") %>%
+  mutate(date = ymd(sprintf("%d/%d/01", year, 3 * quarter - 2))) %>%
+  group_by(sex, date) %>%
+  summarize(mean = mean(median_weekly_earn)) %>%
+  ggplot(aes(date, mean, color = sex)) +
+  geom_line()
+
+earn %>%
+  filter(sex == "Both Sexes") %>%
+  mutate(
+    date = ymd(sprintf("%d/%d/01", year, 3 * quarter - 2)),
+    race = fct_reorder(race, -median_weekly_earn)
+  ) %>%
+  group_by(race, date) %>%
+  summarize(mean = mean(median_weekly_earn)) %>%
+  ggplot(aes(date, mean, color = race)) +
+  geom_line()
+
+race <- earn %>% filter(sex == "Both Sexes")
+race %>%
+  group_by(race) %>%
+  summarize(mean = mean(n_persons)) %>%
+  ggplot(aes(mean, race)) +
+  geom_col()
+
+earn %>%
+  filter(race != "All Races" & sex != "Both Sexes") %>%
+  group_by(race, sex, date) %>%
+  summarize(value = sum(n_persons)) %>%
+  mutate(demo = paste(race, sex), demo = fct_reorder(demo, -value)) %>%
+  ggplot(aes(date, value, color = demo)) +
+  geom_line()
+
+earn %>% 
+  filter(sex == "Both Sexes" & race == "All Races") %>% 
+  filter(ethnic_origin == "All Origins") %>% 
+  filter(age %in% c("16 to 19 years", "20 to 24 years", "25 to 34 years", "35 to 44 years", "45 to 54 years", "55 to 64 years", "65 years and over")) %>% 
+  ggplot(aes(date, n_persons, color=age)) +
+  geom_line()
+```
+
+# Save Image
+
+Save your image for sharing. Be sure to use the `#TidyTuesday` hashtag in your post on twitter! 
+
+```{r}
+
+# This will save your most recent plot
+ggsave(
+  filename = "My TidyTuesday Plot.png",
+  device = "png"
+)
+```

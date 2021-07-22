@@ -1,0 +1,382 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(tidytext)
+library(textrecipes)
+library(skimr)
+library(jsonlite)
+library(lubridate)
+library(forcats)
+library(corrr)
+library(vip)
+```
+
+```{r}
+df <- read_csv("s01e08/train.csv")
+```
+
+```{r}
+artists <- read_csv("s01e08/artists.csv") |> 
+  mutate(genres = str_match_all(genres, "'(.*?)'[,\\]]"),
+         genres = map(genres, \(x) x[,2]))
+
+process <- function(df) {
+  df |> 
+    mutate(id_artists = str_replace_all(id_artists, "'", '"'),
+           id_artists = map(id_artists, fromJSON)) |> 
+    unnest(id_artists) |> 
+    left_join(artists, by = c("id_artists" = "id")) |>
+    group_by(id) |>
+    summarize(pop = mean(popularity.y, na.rm = TRUE),
+              genres = paste(unlist(genres), collapse = ';'),
+              followers = mean(followers, na.rm = TRUE),
+              n_artists = n()) |>
+    left_join(df, by = "id") |>
+    mutate(artists = str_match_all(artists, "'(.*?)'[,\\]]"),
+           artists = map_chr(artists, \(x) paste(x[,2], collapse=';'))) |>
+    select(-id_artists)
+}
+```
+
+
+```{r}
+set.seed(80085)
+
+split <- initial_split(df |> process())
+train <- training(split)
+test <- testing(split)
+folds <- vfold_cv(train, v = 5)
+
+mset <- metric_set(rmse)
+controls <- control_grid(
+  save_pred = TRUE,
+  verbose = TRUE,
+  save_workflow = TRUE
+)
+```
+
+```{r}
+train |> 
+  ggplot(aes(popularity)) +
+  geom_density(aes(fill = is.na(pop)), alpha = 0.5)
+```
+
+
+```{r}
+new_train <- process(train)
+
+new_train |> 
+  add_count(id) |> 
+  filter(n == 1) |> 
+  ggplot(aes(popularity.y, popularity.x)) +
+  geom_jitter(alpha = 0.5)
+
+new_train |> 
+  add_count(id) |> 
+  filter(n == 1) |> 
+  ggplot(aes(popularity.y, followers)) +
+  geom_jitter(aes(color = popularity.x), alpha = 0.5) +
+  scale_y_log10() +
+  scale_color_gradient2(low = "blue", high = "red", midpoint = 50)
+
+new_train |> 
+  filter(followers != 0) |> 
+  mutate(ratio = popularity.y / log1p(followers)) |> 
+  ggplot(aes(ratio, popularity.x)) +
+  geom_point(alpha = 0.2) +
+  xlim(0,10)
+
+new_train |> 
+  add_count(id) |> 
+  filter(n > 1) |> 
+  group_by(id) |> 
+  summarize(
+    mean = mean(popularity.y, na.rm = TRUE),
+    truth = mean(popularity.x),
+    std = sd(popularity.y, na.rm = TRUE)
+  ) |> 
+  ggplot(aes(mean, truth)) +
+  geom_point(aes(color = std))
+
+
+new_train |> 
+  add_count(id) |> 
+  filter(n > 1) |> 
+  group_by(id) |> 
+  summarize(
+    mean = mean(followers, na.rm = TRUE),
+    truth = mean(popularity.x)
+  ) |> 
+  ggplot(aes(mean, truth)) +
+  geom_point() +
+  scale_x_log10()
+```
+
+
+```{r}
+train |> 
+  skim()
+```
+
+```{r}
+train |>
+  ggplot(aes(popularity)) +
+  geom_density()
+
+train |>
+  skim(popularity)
+```
+
+Naive RMSE: 18.6
+
+Things to look at:
+
+* Numeric features
+* Date features
+* Song name features
+* Artist features
+
+# EDA on numeric features
+
+```{r}
+num_df <- train |>
+  select_if(is.numeric) |>
+  mutate(duration = duration_ms / 6e4) |>
+  select(-id, -release_year, -duration_ms)
+```
+
+```{r}
+cor_tbl <- num_df |>
+  correlate()
+
+cor_tbl |>
+  shave() |>
+  rplot()
+
+cor_tbl |>
+  select(term, popularity) |>
+  tail(-1) |>
+  mutate(term = fct_reorder(term, popularity)) |>
+  ggplot(aes(popularity, term)) +
+  geom_col()
+```
+
+```{r}
+num_df |>
+  pivot_longer(-popularity, names_to = "term", values_to = "val") |>
+  ggplot(aes(val, popularity)) +
+  geom_point(alpha = 0.2) +
+  geom_hline(yintercept = 27, color = "red") +
+  facet_wrap(vars(term), scale = "free")
+```
+
+```{r}
+num_df |>
+  ggplot(aes(duration)) +
+  geom_histogram() +
+  xlim(0, 15)
+```
+
+
+# Dates
+
+```{r}
+train$release |> skim()
+```
+
+```{r}
+summarize_pop <- function(df, ...) {
+  df |> 
+    group_by(...) |> 
+    summarize(mean_pop = mean(popularity),
+              sd = sd(popularity),
+              lo = quantile(popularity, 0.025),
+              hi = quantile(popularity, 0.975),
+              n = n())
+}
+```
+
+```{r}
+train |> 
+  mutate(release_year = 10 * (release_year %/% 10)) |>
+  summarize_pop(release_year) |> 
+  ggplot(aes(release_year, mean_pop)) +
+  geom_point(aes(size = n)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.3) +
+  scale_x_continuous(breaks = seq(1910, 2020, 10))
+
+train |> 
+  filter(!is.na(release_month)) |> 
+  mutate(release_month = as.integer(release_month)) |> 
+  summarize_pop(release_month) |>
+  ggplot(aes(release_month, mean_pop)) +
+  geom_point(aes(size = n)) +
+  geom_line() +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.3) +
+  scale_x_continuous(breaks = 1:12)
+
+train |> 
+  mutate(release_year = 10 * (release_year %/% 10)) |>
+  filter(!is.na(release_month)) |> 
+  mutate(release_month = as.integer(release_month)) |> 
+  summarize_pop(release_year, release_month) |> 
+  ggplot(aes(release_year, release_month)) +
+  geom_tile(aes(fill = mean_pop)) +
+  scale_y_continuous(breaks = 1:12) +
+  scale_x_continuous(breaks = seq(1910, 2020, 10))
+```
+
+```{r}
+train |> 
+  group_by(decade = 10 * (release_year %/% 10)) |> 
+  summarize(mean = mean(is.na(release_month)),
+            n = n()) |> 
+  ggplot(aes(decade, mean)) +
+  geom_point(aes(size = n))
+```
+
+```{r}
+train |> 
+  ggplot(aes(release_year, popularity)) +
+  geom_jitter(aes(color = is.na(release_month)), alpha = 0.5)
+
+train |> 
+  mutate(decade = 10 * (release_year %/% 10)) |> 
+  ggplot(aes(as.factor(decade), popularity)) +
+  geom_boxplot(aes(color = is.na(release_month)))
+```
+
+
+
+# Name
+
+```{r}
+train |> 
+  mutate(foreign = str_detect(name, "[^\\x00-\\x7F]")) |> 
+  ggplot(aes(popularity)) +
+  geom_density(aes(fill = foreign), alpha = 0.5)
+```
+
+
+
+# Artists
+
+```{r}
+df_art <- train |> 
+  unnest(id_artists) |> 
+  left_join(artists, by = c("id_artists" = "id"))
+
+df_art |> 
+  ggplot(aes(followers, popularity.x)) +
+  geom_point() +
+  geom_smooth(method = 'lm')
+
+df_art |> 
+  ggplot(aes(popularity.y, popularity.x)) +
+  geom_point() +
+  geom_smooth(method = 'lm')
+
+df_art |> 
+  ggplot(aes(popularity.x)) +
+  geom_density(aes(fill = is.na(popularity.y)), alpha = 0.2)
+
+df_art |> 
+  count(genres)
+```
+
+
+
+# Modeling
+
+```{r}
+num_rec <- recipe(popularity ~ ., data = train) |>
+  step_mutate(is_winter = release_month %in% c("1", "12"),
+              # na_month = is.na(release_month),
+              foreign = str_detect(name, "[^\\x00-\\x7F]")) |> 
+  step_rm(id,
+          name,
+          release_month, release_day,
+          genres,
+          artists,
+          key, n_artists)
+
+num_rec |> 
+  prep() |> 
+  juice()
+```
+
+
+```{r}
+num_model <- boost_tree(trees = tune(), mtry = tune(), learn_rate = tune()) |> 
+  set_engine("xgboost")
+
+num_workflow <- workflow() |> 
+  add_recipe(num_rec) |> 
+  add_model(num_model)
+```
+
+```{r}
+res <- num_workflow |> 
+  # fit_resamples(folds, metrics = mset, control = controls)
+  tune_grid(folds, metrics = mset, control = controls, grid = crossing(
+    trees = seq(300, 800, 50),
+    mtry = c(5,7),
+    learn_rate = 10^seq(-3, -1.5, 0.5)
+  ))
+
+autoplot(res)
+```
+
+```{r}
+res |> 
+  collect_metrics() |> 
+  arrange(mean)
+```
+
+```{r}
+fitted <- num_workflow |>
+  finalize_workflow(select_best(res, 'rmse')) |> 
+  fit(train)
+
+fitted |> 
+  augment(test) |> 
+  with(rmse_vec(popularity, .pred))
+
+fitted |> 
+  extract_fit_engine() |> 
+  vip(n = 20)
+```
+
+XGB
+
+* numeric features: 10.81
+* removed key + n_artists: 10.82
+
+
+```{r}
+cat_rec <- recipe(popularity ~ artists + genres, data = train) |> 
+  step_tokenize(artists, genres) |> 
+  step_tokenfilter(artists, max_tokens = tune("artists")) |> 
+  step_tokenfilter(genres, max_tokens = tune("genres")) |> 
+  step_tf(genres, artists)
+```
+
+```{r}
+cat_model <- linear_reg(penalty = tune()) |> 
+  set_engine("glmnet")
+
+cat_workflow <- workflow(cat_rec, cat_model)
+```
+
+```{r}
+res <- cat_workflow |> 
+  tune_grid(folds, metrics = mset, control = controls, grid = crossing(
+    penalty = 10^seq(-4, -1, 0.2),
+    artists = floor(seq(450, 650, length.out = 5)),
+    genres = floor(seq(450, 650, length.out = 5))
+  ))
+
+autoplot(res)
+```
+

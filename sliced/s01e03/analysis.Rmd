@@ -1,0 +1,219 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(forcats)
+library(viridis)
+
+doParallel::registerDoParallel(cores = 1)
+
+set.seed(42069)
+df <- read_csv("train.csv")
+split <- initial_split(df)
+train <- training(split)
+test <- testing(split)
+
+holdout <- read_csv("test.csv")
+
+folds <- vfold_cv(train, v = 5)
+mset <- metric_set(rmse)
+
+
+get_profits <- function(df, ...) {
+  df %>%
+    group_by(...) %>%
+    summarize(
+      lo = quantile(profit, 0.025),
+      hi = quantile(profit, 0.975),
+      profit = mean(profit),
+      n = n(),
+    )
+}
+```
+
+```{r}
+skim(train)
+```
+
+```{r}
+train %>%
+  ggplot(aes(profit)) +
+  geom_histogram() +
+  xlim(-50, 50)
+
+skim(train$profit)
+nrow(train)
+train %>% View()
+```
+
+```{r}
+train %>%
+  ggplot(aes(sales, profit)) +
+  geom_point(aes(color = discount))
+
+train %>%
+  ggplot(aes(sales, discount)) +
+  geom_point(aes(color = profit)) +
+  scale_color_gradient2(low = "red", high = "blue", mid = "purple")
+
+train %>%
+  group_by(sales = 20 * floor(sales / 20), discount) %>%
+  summarize(n = n(), profit = mean(profit)) %>%
+  ggplot(aes(sales, discount)) +
+  geom_point(aes(color = profit, size = n)) +
+  scale_color_viridis()
+
+train %>%
+  ggplot(aes(as.factor(discount), profit)) +
+  geom_boxplot() +
+  ylim(-500, 500)
+
+train %>%
+  group_by(discount) %>%
+  summarize(profit = mean(profit)) %>%
+  ggplot(aes(discount, profit)) +
+  geom_point()
+```
+
+```{r}
+train %>%
+  get_profits(segment) %>%
+  ggplot(aes(profit, segment)) +
+  geom_point(aes(size = n)) +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.3)
+
+train %>%
+  get_profits(sub_category) %>%
+  mutate(sub_category = fct_reorder(sub_category, profit)) %>%
+  ggplot(aes(profit, sub_category)) +
+  geom_point(aes(size = n)) +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.3)
+
+train %>%
+  get_profits(state) %>%
+  mutate(state = fct_reorder(state, profit)) %>%
+  ggplot(aes(profit, state)) +
+  geom_point(aes(size = n)) +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.3)
+
+train %>%
+  get_profits(region) %>%
+  ggplot(aes(profit, region)) +
+  geom_point(aes(size = n)) +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.3)
+
+train %>%
+  get_profits(ship_mode) %>%
+  ggplot(aes(profit, ship_mode)) +
+  geom_point(aes(size = n)) +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.3)
+```
+
+```{r}
+train %>% 
+  ggplot(aes(as.factor(quantity), profit)) +
+  geom_boxplot() +
+  ylim(-50, 50)
+```
+
+
+
+
+
+### Modeling
+
+- 179 --- Naive
+- 139 --- lm on sales + discount
+- 88  ---    + interaction    (147)
+- 75  ---    + ns on discount (131)
+- 67  ---    + sub_category and region (118)
+
+```{r}
+lin_rec <- recipe(profit ~ sales + discount
+  + sub_category + region
+  ,
+  data = train
+) %>%
+  # step_ns(discount, deg_free=10) %>%
+  step_interact(terms = ~ sales:starts_with("discount")) %>%
+  step_dummy(all_nominal_predictors())
+
+# lin_rec %>%
+#   prep() %>%
+#   bake(new_data = NULL)
+
+lin_model <- linear_reg() %>%
+  set_engine("lm")
+# set_engine("glmnet") %>%
+# set_args(penalty = tune())
+
+lin_workflow <- workflow() %>%
+  add_recipe(lin_rec) %>%
+  add_model(lin_model)
+
+res <- lin_workflow %>%
+  # tune_grid(folds, metrics = mset,
+  #           grid = crossing(penalty = 10^seq(-5,-.5,.5)))
+  fit_resamples(folds, metrics = mset)
+
+res %>%
+  collect_metrics()
+```
+
+
+```{r}
+xg_rec <- recipe(profit ~ sales + discount, data = train) %>% 
+  step_interact(~sales:discount)
+
+xg_model <- boost_tree(trees = tune(), learn_rate = tune()) %>%
+  set_engine("xgboost")
+
+xg_workflow <- workflow() %>%
+  add_recipe(xg_rec) %>%
+  add_model(xg_model)
+
+res <- xg_workflow %>%
+  tune_grid(folds,
+    metrics = mset,
+    grid = crossing(
+      trees = c(seq(250, 600, 50)),
+      learn_rate = c(0.003,0.01, 0.03),
+    )
+  )
+
+res %>% autoplot()
+```
+
+
+
+
+
+```{r}
+lin_workflow %>%
+  fit(df) %>%
+  augment(test) %>%
+  with(rmse_vec(.pred, profit))
+```
+
+```{r}
+lin_workflow %>%
+  fit(df) %>%
+  augment(holdout) %>%
+  select(id, profit = .pred) %>%
+  write_csv("attempt.csv")
+```
+
+```{r}
+xg_workflow %>%
+  finalize_workflow(select_best(res, "rmse")) %>%
+  fit(df) %>%
+  augment(test) %>%
+  with(rmse_vec(.pred, profit))
+
+xg_workflow %>%
+  finalize_workflow(select_best(res, "rmse")) %>%
+  fit(df) %>%
+  augment(holdout) %>%
+  select(id, profit = .pred) %>%
+  write_csv("attempt.csv")
+```

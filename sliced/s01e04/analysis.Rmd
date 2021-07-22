@@ -1,0 +1,306 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(lubridate)
+library(forcats)
+library(corrr)
+library(skimr)
+
+doParallel::registerDoParallel(cores = 2)
+```
+
+```{r}
+df <- read_csv("train.csv") %>%
+  mutate(
+    date = ymd(date),
+    del_humid = humidity3pm - humidity9am,
+    del_wind = wind_speed3pm - wind_speed9am,
+    del_cloud = cloud3pm - cloud9am,
+    del_temp = temp3pm - temp9am,
+    del_pressure = pressure3pm - pressure9am
+  )
+split <- initial_split(df)
+train <- training(split)
+test <- testing(split)
+```
+
+```{r}
+mset <- metric_set(mn_log_loss)
+
+(p <- train %>%
+  pull(rain_tomorrow) %>%
+  mean())
+
+-p * log(p) - (1 - p) * log(1 - p)
+```
+
+```{r}
+skim(train)
+```
+
+### Naive: p = 0.222, logloss - 0.529
+
+```{r}
+train %>%
+  select(-id) %>%
+  select_if(\(x) is.numeric(x) | is.logical(x)) %>%
+  correlate() %>%
+  select(term, rain_tomorrow) %>%
+  mutate(term = fct_reorder(term, rain_tomorrow)) %>%
+  filter(!is.na(rain_tomorrow)) %>%
+  ggplot(aes(rain_tomorrow, term)) +
+  geom_col()
+
+train %>%
+  select(-id) %>%
+  select_if(\(x) is.numeric(x) | is.logical(x)) %>%
+  correlate() %>%
+  shave() %>%
+  pivot_longer(!term, names_to = "term1", values_to = "val") %>%
+  filter(!is.na(val)) %>%
+  mutate(inter = fct_reorder(paste0(term, "-", term1), val)) %>%
+  arrange(desc(abs(val))) %>%
+  head(30) %>%
+  ggplot(aes(val, inter)) +
+  geom_col()
+```
+
+Temps are pretty correlated.  Delta-temp seems important and uncorrelated with temps
+
+### Numericals
+
+- Positive (most to least): Humidity 3pm, clouds, rain_today, humidity 9am, windgust
+- Negative (most to least): Pressure, temp, maxtemp, sunshine, evap
+
+
+```{r}
+train %>%
+  count(rain_today, rain_tomorrow) %>%
+  pivot_wider(rain_today, names_from = rain_tomorrow, values_from = n)
+
+train %>%
+  count(rain_today, rain_tomorrow) %>%
+  ggplot(aes(rain_tomorrow, n)) +
+  geom_col() +
+  facet_wrap(~rain_today, scale = "free")
+```
+
+```{r}
+train %>%
+  filter((rain_today == 0) & (rainfall > 0))
+```
+
+```{r}
+compute_probs <- function(df, ...) {
+  df %>%
+    group_by(...) %>%
+    summarize(
+      mean = mean(rain_tomorrow),
+      n = n()
+    )
+}
+```
+
+
+```{r}
+train %>%
+  ggplot(aes(x = humidity3pm, y = ..density..)) +
+  geom_freqpoly(aes(color = as.factor(rain_tomorrow)))
+
+train %>%
+  group_by(humidity3pm, rain_tomorrow) %>%
+  summarize(n = n()) %>%
+  mutate(pct = n / sum(n)) %>%
+  ggplot(aes(x = humidity3pm, y = pct)) +
+  geom_area(aes(fill = as.factor(rain_tomorrow)))
+
+train %>%
+  mutate(delta_humid = floor((humidity3pm - humidity9am) / 5)) %>%
+  compute_probs(delta_humid) %>%
+  ggplot(aes(delta_humid, mean)) +
+  geom_point(aes(size = n))
+
+train %>%
+  mutate(delta_humid = humidity3pm - humidity9am) %>%
+  glm(formula = rain_tomorrow ~ delta_humid + humidity3pm, family = "binomial") %>%
+  summary()
+
+train %>%
+  mutate(humidity3pm = floor(humidity3pm / 5)) %>%
+  compute_probs(humidity3pm) %>%
+  ggplot(aes(humidity3pm, mean)) +
+  geom_point(aes(size = n))
+```
+
+- Humidity is highly predictive
+
+```{r}
+train %>%
+  compute_probs(cloud3pm) %>%
+  ggplot(aes(cloud3pm, mean)) +
+  geom_point(aes(size = n))
+```
+
+- Clouds are also predictive
+
+```{r}
+train %>%
+  compute_probs(wind_speed3pm) %>%
+  ggplot(aes(wind_speed3pm, mean)) +
+  geom_point(aes(size = n)) +
+  geom_smooth(method = "lm")
+
+train %>%
+  compute_probs(wind_gust_speed) %>%
+  ggplot(aes(wind_gust_speed, mean)) +
+  geom_point(aes(size = n))
+```
+
+- Windspeed a little predictive
+
+```{r}
+train %>%
+  ggplot(aes(del_temp)) +
+  geom_histogram()
+
+train %>%
+  mutate(del_temp = floor(del_temp / 3)) %>%
+  compute_probs(del_temp) %>%
+  ggplot(aes(del_temp, mean)) +
+  geom_point(aes(size = n))
+
+train %>%
+  ggplot(aes(del_temp, y = ..density..)) +
+  geom_freqpoly(aes(color = as.factor(rain_tomorrow)))
+
+train %>%
+  with(cor(temp3pm, temp3pm, use = "complete.obs"))
+```
+
+- del_temp is not correlated and predictive
+
+### Date
+
+```{r}
+train %>%
+  mutate(month = month(date)) %>%
+  compute_probs(month) %>%
+  ggplot(aes(month, mean)) +
+  geom_line()
+
+train %>%
+  mutate(
+    month = month(date),
+    year = year(date)
+  ) %>%
+  compute_probs(month, year) %>%
+  group_by(month) %>%
+  summarize(
+    q50 = median(mean),
+    q25 = quantile(mean, 0.25),
+    q75 = quantile(mean, 0.75)
+  ) %>%
+  pivot_longer(!month, names_to = "type", values_to = "val") %>%
+  ggplot(aes(month, val)) +
+  geom_line(aes(color = type))
+
+
+train %>%
+  mutate(year = year(date)) %>%
+  compute_probs(year) %>%
+  ggplot(aes(year, mean)) +
+  geom_point(aes(size = n))
+
+train %>%
+  mutate(
+    year = year(date),
+    month = month(date)
+  ) %>%
+  compute_probs(month, year) %>%
+  group_by(year) %>%
+  summarize(
+    q50 = median(mean),
+    q25 = quantile(mean, 0.25),
+    q75 = quantile(mean, 0.75)
+  ) %>%
+  pivot_longer(!year, names_to = "type", values_to = "val") %>%
+  ggplot(aes(year, val)) +
+  geom_line(aes(color = type))
+```
+
+- Month probably useful (nonlinear).  Year, not so much
+
+### Categoricals
+
+```{r}
+train %>%
+  ggplot(aes(wind_dir3pm)) +
+  geom_bar(aes(y = ..prop.., group = 1)) +
+  facet_grid(row = vars(rain_tomorrow), scales = "free")
+
+train %>%
+  with(table(rain_tomorrow, wind_dir3pm)) %>%
+  chisq.test()
+```
+
+```{r}
+train %>%
+  count(location) %>%
+  ggplot(aes(n)) +
+  geom_histogram()
+
+train %>%
+  group_by(location) %>%
+  summarize(p = mean(rain_tomorrow), n = n(), sd = sd(rain_tomorrow)) %>%
+  ggplot(aes(n, p)) +
+  geom_point(aes(size = sd)) +
+  geom_hline(yintercept = 0.222, color = "red")
+```
+
+
+### Model building
+
+```{r}
+train_fac <- train %>% mutate(rain_tomorrow = as.factor(rain_tomorrow))
+train_folds <- vfold_cv(train_fac, v = 10)
+
+lin_rec <- recipe(rain_tomorrow ~ min_temp + max_temp + wind_gust_speed + wind_speed9am + wind_speed3pm + humidity9am + humidity3pm + pressure9am + pressure3pm + cloud9am + cloud3pm + temp9am + temp3pm + rain_today, data = train) %>%
+  step_impute_mean(all_numeric_predictors())
+```
+
+```{r}
+lin_model <- logistic_reg() %>%
+  set_engine("glm")
+
+lin_workflow <- workflow() %>%
+  add_recipe(lin_rec) %>%
+  add_model(lin_model)
+
+res <- lin_workflow %>%
+  fit_resamples(train_folds, metrics = mset)
+# grid= crossing(penalty=10^ seq(-7,-.5,.1)))
+
+res %>% collect_metrics()
+```
+
+```{r}
+fitted <- lin_workflow %>%
+  fit(train_fac)
+
+mn_log_loss_vec(as_factor(test$rain_tomorrow), predict(fitted, test, type = "prob")$.pred_0)
+```
+
+```{r}
+xgb_model <- boost_tree(mode = "classification", trees = tune(), learn_rate = tune()) %>%
+  set_engine("xgboost")
+
+res <- workflow() %>%
+  add_recipe(lin_rec) %>%
+  add_model(xgb_model) %>%
+  tune_grid(train_folds, metrics = mset, grid = crossing(trees = c(10, 20, 50),
+                                                         learn_rate = c(0.01,0.03,0.1)))
+```
+
+```{r}
+res %>% autoplot()
+```
