@@ -3,7 +3,6 @@ library(tidyverse)
 library(tidymodels)
 library(forcats)
 library(lubridate)
-library(DataExplorer)
 library(skimr)
 library(corrr)
 library(GGally)
@@ -28,21 +27,30 @@ mset <- metric_set(rmse)
 grid_control <- control_grid(
   save_pred = TRUE,
   save_workflow = TRUE,
-  verbose = TRUE,
-  extract = extract_model
+  verbose = TRUE
 )
-
-train %>% View()
 ```
 
 ```{r}
+summary(train$date_time)
+
+train |> 
+  filter(date_time <= ymd("2010-06-30"),
+         date_time >= ymd("2010-05-01")) |> 
+  pivot_longer(-date_time, names_to = "target", values_to = "val") |>
+```
+
+
+```{r}
+ggplot(aes(date_time, val)) +
+  geom_line() +
+  facet_grid(rows = vars(target), scales = "free_y")
+```
+
+
+```{r}
 train <- train %>%
-  mutate(
-    date = as_date(date_time),
-    hour = hour(date_time),
-    day = wday(date_time),
-    cluster = sensor_4 < 200 + sensor_1 / 2
-  )
+  mutate(cluster = sensor_4 < 200 + sensor_1 / 2)
 
 train %>% 
   mutate(hour = (hour + 20) %% 24) %>% 

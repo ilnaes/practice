@@ -1,0 +1,240 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(fpp3)
+library(lubridate)
+library(skimr)
+library(corrr)
+```
+
+```{r}
+set.seed(80085)
+
+df <- read_csv("2021-07/train.csv") %>%
+  mutate(
+    target_carbon_monoxide = log1p(target_carbon_monoxide),
+    target_benzene = log1p(target_benzene),
+    target_nitrogen_oxides = log1p(target_nitrogen_oxides)
+  )
+split <- initial_split(df)
+train <- training(split)
+test <- testing(split)
+folds <- vfold_cv(train, v = 5)
+
+mset <- metric_set(rmse)
+grid_control <- control_grid(
+  save_pred = TRUE,
+  save_workflow = TRUE,
+  verbose = TRUE
+)
+```
+
+```{r}
+ts_train <- train |>
+  as_tsibble(index = date_time) |>
+  fill_gaps() |>
+  mutate(missing = is.na(target_benzene)) |>
+  fill(-missing, .direction = c("down"))
+
+ts_train |>
+  as_tibble() |>
+  count(missing)
+```
+
+
+```{r}
+train |>
+  mutate(cluster = sensor_4 < 200 + sensor_1 / 2) |>
+  pivot_longer(-c("date_time", "cluster"), names_to = "term", values_to = "val") |>
+  ggplot(aes(date_time, val)) +
+  geom_line() +
+  facet_grid(rows = vars(term), scale = "free_y")
+```
+
+
+```{r}
+columns <- names(ts_train)[-1, -13, -14]
+
+decomp_ts <-
+  map2(
+    train |> select(-date_time, -cluster), columns,
+    \(x, y)    {
+      tmp <- tibble(term = x, date = train$date_time) |>
+        as_tsibble(index = date) |>
+        fill_gaps() |>
+        fill(term, .direction = "down") |>
+        model(stl = classical_decomposition(term)) |>
+        components() |>
+        select(-.model, -date)
+
+      names(tmp) <- names(tmp) |>
+        map_chr(\(z) paste(y, z, sep = "_"))
+
+      as_tibble(tmp)
+    }
+  ) |>
+  bind_cols() |>
+  mutate(
+    dt = ts_train$date_time,
+    missing = ts_train$missing,
+    cluster = ts_train$cluster
+  )
+```
+
+```{r}
+benzene_seasonal <- ts_train |>
+  model(cd = classical_decomposition(target_benzene)) |>
+  components() |>
+  tail(-6) |>
+  mutate(hour = hour(date_time) + 1) |>
+  as_tibble() |>
+  head(24) |>
+  pluck("seasonal")
+
+carbon_seasonal <- ts_train |>
+  model(cd = classical_decomposition(target_carbon_monoxide)) |>
+  components() |>
+  tail(-6) |>
+  mutate(hour = hour(date_time) + 1) |>
+  as_tibble() |>
+  head(24) |>
+  pluck("seasonal")
+
+nitrogen_seasonal <- ts_train |>
+  model(cd = classical_decomposition(target_nitrogen_oxides)) |>
+  components() |>
+  tail(-6) |>
+  mutate(hour = hour(date_time) + 1) |>
+  as_tibble() |>
+  head(24) |>
+  pluck("seasonal")
+
+ts_train |>
+  model(cd = classical_decomposition(target_benzene)) |>
+  components() |>
+  as_tibble() |>
+  mutate(
+    hour = hour(date_time) + 1,
+    season = benzene_seasonal[hour]
+  ) |>
+  with(max(abs(seasonal - season)))
+
+ts_train |>
+  model(stl = classical_decomposition(target_benzene)) |>
+  components() |>
+  filter(
+    date_time <= ymd("2010-05-07"),
+    date_time >= ymd("2010-05-01")
+  ) |>
+  ggplot(aes(date_time, seasonal)) +
+  geom_line()
+```
+
+```{r}
+sa_ts <-
+  decomp_ts |>
+  select(ends_with("season_adjust"), dt, missing, cluster)
+
+sa_ts |>
+  pivot_longer(-c("dt", "missing", "cluster"), names_to = "term", values_to = "val") |>
+  ggplot(aes(dt, val)) +
+  geom_line() +
+  facet_grid(rows = vars(term), scales = "free_y")
+
+sa_ts |>
+  select(-dt, -missing) |>
+  correlate() |>
+  select(term, starts_with("target")) |>
+  head(-3) |>
+  pivot_longer(-term, names_to = "target", values_to = "val") |>
+  ggplot(aes(val, term)) +
+  geom_col(aes(fill = target), position = "dodge")
+
+cor_tbl <- sa_ts |>
+  select(-dt, -missing, -cluster) |>
+  correlate() |>
+  select(term, starts_with("target")) |>
+  head(-3) |>
+  bind_cols(
+    train |>
+      select(-date_time, -cluster) |>
+      correlate() |>
+      select(starts_with("target")) |>
+      head(-3)
+  )
+
+cor_tbl |>
+  pivot_longer(-term, names_to = "target", values_to = "val") |>
+  mutate(
+    adjust = str_detect(target, "season_adjust"),
+    target = ifelse(adjust, str_match(target, "(.*?)_season_adjust")[, 2], target),
+    term = str_match(term, "(.*?)_season")[, 2]
+  ) |>
+  unite("inter", c("term", "target")) |>
+  ggplot(aes(val, inter)) +
+  geom_col(aes(fill = adjust), position = "dodge")
+```
+
+```{r}
+sa_ts |>
+  ggplot(aes(sensor_5_season_adjust, target_carbon_monoxide_season_adjust)) +
+  geom_point(aes(color = cluster), alpha = 0.5)
+
+train |>
+  ggplot(aes(sensor_5, target_carbon_monoxide)) +
+  geom_point(aes(color = cluster), alpha = 0.5)
+```
+
+```{r}
+ben_rec <- recipe(target_benzene ~ date_time + deg_C + relative_humidity + sensor_1 + sensor_2 + sensor_3 + sensor_4 + sensor_5, data = train) |>
+  step_mutate(
+    cluster = sensor_4 < 200 + sensor_1 / 2,
+    seasonal = benzene_seasonal[hour(date_time) + 1]
+  ) |> 
+  step_rm(date_time)
+
+ben_rec |>
+  prep() |>
+  bake(new_data = holdout) |> 
+  select(seasonal)
+```
+
+```{r}
+ben_model <- boost_tree(learn_rate = tune(), trees = tune(), mtry = tune())
+
+ben_workflow <- workflow(ben_rec, ben_model)
+```
+
+```{r}
+ben_tune <- ben_workflow |> 
+  tune_grid(folds, metrics = mset, control = grid_control, grid = crossing(
+    trees = floor(seq(800, 1500, length.out = 10)),
+    learn_rate = 10^seq(-2, -1, length.out = 4),
+    mtry = c(2, 3, 4)
+  ))
+```
+
+```{r}
+ben_tune |> 
+  collect_metrics() |> 
+  arrange(mean)
+
+autoplot(ben_tune)
+```
+
+
+```{r}
+ben_workflow %>%
+  finalize_workflow(select_best(ben_tune, "rmse")) %>%
+  fit(train) %>%
+  augment(test) %>%
+  with(rmse_vec(.pred, target_benzene))
+```
+
+
+
+
+```{r}
+holdout <- read_csv("2021-07/test.csv")
+holdout
+```
