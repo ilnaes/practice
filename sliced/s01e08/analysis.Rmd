@@ -9,25 +9,26 @@ library(lubridate)
 library(forcats)
 library(corrr)
 library(vip)
+library(stacks)
 ```
 
 ```{r}
-df <- read_csv("s01e08/train.csv")
+df <- read_csv("train.csv")
 ```
 
 ```{r}
-artists <- read_csv("s01e08/artists.csv") |> 
+artists <- read_csv("artists.csv") |> 
   mutate(genres = str_match_all(genres, "'(.*?)'[,\\]]"),
          genres = map(genres, \(x) x[,2]))
 
-process <- function(df) {
+process <- function(df, train = TRUE) {
   df |> 
     mutate(id_artists = str_replace_all(id_artists, "'", '"'),
            id_artists = map(id_artists, fromJSON)) |> 
     unnest(id_artists) |> 
     left_join(artists, by = c("id_artists" = "id")) |>
     group_by(id) |>
-    summarize(pop = mean(popularity.y, na.rm = TRUE),
+    summarize(pop = mean(ifelse(train, popularity.y, popularity), na.rm = TRUE),
               genres = paste(unlist(genres), collapse = ';'),
               followers = mean(followers, na.rm = TRUE),
               n_artists = n()) |>
@@ -317,7 +318,8 @@ num_workflow <- workflow() |>
 ```
 
 ```{r}
-res <- num_workflow |> 
+doParallel::registerDoParallel(cores = 3)
+num_tune <- num_workflow |> 
   # fit_resamples(folds, metrics = mset, control = controls)
   tune_grid(folds, metrics = mset, control = controls, grid = crossing(
     trees = seq(300, 800, 50),
@@ -325,18 +327,18 @@ res <- num_workflow |>
     learn_rate = 10^seq(-3, -1.5, 0.5)
   ))
 
-autoplot(res)
+# autoplot(res)
 ```
 
 ```{r}
-res |> 
+num_tune |> 
   collect_metrics() |> 
   arrange(mean)
 ```
 
 ```{r}
 fitted <- num_workflow |>
-  finalize_workflow(select_best(res, 'rmse')) |> 
+  finalize_workflow(select_best(num_tune, 'rmse')) |> 
   fit(train)
 
 fitted |> 
@@ -356,10 +358,11 @@ XGB
 
 ```{r}
 cat_rec <- recipe(popularity ~ artists + genres, data = train) |> 
-  step_tokenize(artists, genres) |> 
-  step_tokenfilter(artists, max_tokens = tune("artists")) |> 
+  step_tokenize(artists, genres, token = "regex", options = list(pattern = ";")) |> 
+  step_tokenfilter(artists, max_tokens = tune('artists')) |> 
   step_tokenfilter(genres, max_tokens = tune("genres")) |> 
-  step_tf(genres, artists)
+  step_tf(genres, artists, weight_scheme = "term frequency") |>
+  step_mutate_at(contains("tf_"), fn = \(x) ifelse(is.na(x), 0, x))
 ```
 
 ```{r}
@@ -370,13 +373,51 @@ cat_workflow <- workflow(cat_rec, cat_model)
 ```
 
 ```{r}
-res <- cat_workflow |> 
+doParallel::registerDoParallel(cores = 3)
+
+cat_tune <- cat_workflow |> 
   tune_grid(folds, metrics = mset, control = controls, grid = crossing(
     penalty = 10^seq(-4, -1, 0.2),
-    artists = floor(seq(450, 650, length.out = 5)),
-    genres = floor(seq(450, 650, length.out = 5))
+    artists = floor(seq(500, 1000, length.out = 6)),
+    genres = floor(seq(500, 1000, length.out = 6))
   ))
 
-autoplot(res)
+cat_tune |>
+  collect_metrics()
+
+save(cat_tune, file="cat.RData")
+# autoplot(res)
 ```
+
+```{r}
+num_best <- num_tune |>
+  filter_parameters(parameters = select_best(num_tune))
+
+cat_best <- cat_tune |>
+  filter_parameters(parameters = select_best(cat_tune))
+
+blended_lin_xg <- stacks() |>
+  add_candidates(num_best) |>
+  add_candidates(cat_best) |>
+  blend_predictions(control = controls)
+
+blended_lin_xg_fit <- blended_lin_xg |>
+  fit_members()
+
+blended_lin_xg_fit
+```
+
+```{r}
+holdout <- read_csv('test.csv') |>
+  process(train = FALSE)
+
+blended_lin_xg_fit |>
+  predict(holdout) |>
+  rename(popularity = .pred) |>
+  mutate(popularity = pmin(pmax(popularity, 0), 100),
+         id = holdout$id) |>
+  write_csv("attempt2.csv")
+```
+
+
 
