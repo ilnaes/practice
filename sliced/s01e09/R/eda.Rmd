@@ -1,0 +1,337 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(visdat)
+library(here)
+library(GGally)
+library(lubridate)
+```
+
+```{r}
+parks <- read_csv(here("data", "park_dimensions.csv")) |> 
+  pivot_longer(contains("F_"), names_to = "name", values_to = "length") |>
+  mutate(
+    bearing = case_when(
+      str_detect(name, "LF") ~ "left",
+      str_detect(name, "RF") ~ "right",
+      str_detect(name, "CF") ~ "center",
+      TRUE ~ name
+    ),
+    type = str_match(name, "\\w\\w_(.*)")[, 2]
+  ) |>
+  select(-name, -Cover, -NAME) |> 
+  group_by(park, bearing) |> 
+  pivot_wider(c("park", "bearing"), names_from = "type", values_from = "length")
+```
+
+```{r}
+df <- read_csv(here("data", "train.csv")) |>
+  mutate(is_home_run = as.logical(is_home_run)) |>
+  left_join(parks, by = "park")
+```
+
+
+```{r}
+set.seed(8291)
+split <- initial_split(df, strata = "is_home_run")
+train <- training(split)
+```
+
+```{r}
+skim(train)
+vis_miss(train)
+```
+
+5.29% HR: Need to handle class imbalance?
+
+```{r}
+train |>
+  summarize(mean(is.na(launch_speed) | is.na(launch_angle)))
+```
+
+44.1% rows missing data from launch
+
+```{r}
+summarize_hr <- function(df, ...) {
+  df |>
+    group_by(...) |>
+    summarize(
+      mean = mean(is_home_run),
+      n = n(),
+      hr = sum(is_home_run)
+    )
+}
+```
+
+
+```{r}
+train |>
+  summarize_hr(bb_type)
+```
+
+Only fly balls and line drives are homeruns (with fly ball twice as likely)
+
+```{r}
+train |>
+  filter(bb_type %in% c("fly_ball", "line_drive")) |>
+  select(starts_with("launch")) |>
+  vis_miss()
+```
+
+Still a lot of missing data.  Let's just look at fly balls and line_drives
+
+```{r}
+train <-
+  train |>
+  filter(bb_type %in% c("fly_ball", "line_drive"))
+```
+
+
+# Pure isolated characteristics
+
+```{r}
+launches <- train |>
+  select(starts_with("launch"), is_home_run)
+
+launches |>
+  pivot_longer(-is_home_run, names_to = "term", values_to = "val") |>
+  ggplot(aes(val)) +
+  geom_density(aes(fill = as.factor(is_home_run)), alpha = 0.5) +
+  facet_grid(rows = vars(term))
+
+launches |>
+  ggplot(aes(launch_speed, launch_angle)) +
+  geom_point(aes(color = is_home_run))
+
+launches |>
+  mutate(
+    v = launch_speed * sin(launch_angle * pi / 180),
+    h = launch_speed * cos(launch_angle * pi / 180)
+  ) |>
+  ggplot(aes(h, v)) +
+  geom_point(aes(color = is_home_run))
+
+launches |>
+  mutate(dist = launch_speed^2 * sin(launch_angle * pi / 180) * cos(launch_angle * pi / 180)) |>
+  ggplot(aes(dist)) +
+  geom_density(aes(fill = as.factor(is_home_run)), alpha = 0.5)
+
+launches |>
+  ggplot(aes(launch_speed)) +
+  geom_density(aes(fill = as.factor(is_home_run)), alpha = 0.5)
+
+launches |>
+  ggplot(aes(launch_angle)) +
+  geom_density(aes(fill = as.factor(is_home_run)), alpha = 0.5)
+```
+
+
+```{r}
+delta_df <- train |> 
+  mutate(
+    dist = launch_speed^2 * sin(launch_angle * pi / 180) * cos(launch_angle * pi / 180) * 0.44704^2 * 2 / 9.8,
+    delta = dist - Dim * 0.3048
+  )
+
+delta_df |> 
+  filter(dist > 0, bb_type %in% c("fly_ball", "line_drive")) |> 
+  summarize(mean(is_home_run))
+
+delta_df |> 
+  ggplot(aes(delta)) +
+  geom_density(aes(fill = as.factor(is_home_run)), alpha = 0.5) +
+  facet_wrap(~bearing)
+
+delta_df |>
+  filter(!is.na(delta)) |> 
+  glm(formula = is_home_run ~ delta + bearing, family = "binomial") |> 
+  summary()
+
+delta_df |> 
+  mutate(is_home_run = as.logical(is_home_run)) |> 
+  select(is_home_run, delta, bearing) |> 
+  distinct(is_home_run, bearing)
+```
+
+Probably don't need trigonometric transforms
+
+```{r}
+train |>
+  ggplot(aes(plate_x, plate_z)) +
+  geom_point(aes(color = is_home_run), alpha = 0.2)
+
+train |>
+  pivot_longer(c("plate_x", "plate_z"), names_to = "term", values_to = "val") |>
+  ggplot(aes(val)) +
+  geom_density(aes(fill = as.factor(is_home_run)), alpha = 0.5) +
+  facet_grid(rows = vars(term), scales = "free_x")
+
+t.test(train |> filter(is_home_run) |> pull(plate_z), train |> filter(!is_home_run) |> pull(plate_z))
+
+t.test(train |> filter(is_home_run) |> pull(plate_x), train |> filter(!is_home_run) |> pull(plate_x))
+```
+
+Z position of plate matters, but X doesn't seem to.
+
+```{r}
+train |>
+  summarize_hr(bearing)
+```
+
+Huge differences
+
+```{r}
+train |>
+  ggplot(aes(pitch_mph)) +
+  geom_density(aes(fill = is_home_run), alpha = 0.5)
+
+train |>
+  summarize_hr(pitch_name) |>
+  mutate(
+    pitch_name = fct_reorder(pitch_name, mean),
+    lo = qbeta(0.025, hr + 1 / 2, n - hr + 1 / 2),
+    hi = qbeta(0.975, hr + 1 / 2, n - hr + 1 / 2)
+  ) |>
+  ggplot(aes(mean, pitch_name)) +
+  geom_point(aes(size = n)) +
+  geom_errorbarh(aes(xmin = lo, xmax = hi), height = 0.5)
+
+
+train |>
+  ggplot(aes(pitch_mph)) +
+  geom_density(aes(fill = is_home_run), alpha = 0.5) +
+  facet_wrap(~pitch_name)
+```
+
+Different pitch types matter.  Speed seems to matter for knuckle curve, curve, and cutter.
+
+```{r}
+train |>
+  group_by(is_batter_lefty, is_pitcher_lefty) |>
+  summarize(
+    mean = mean(is_home_run),
+    n = n()
+  ) |>
+  ggplot(aes(is_batter_lefty, mean)) +
+  geom_col(aes(fill = as.logical(is_pitcher_lefty)), position = "dodge")
+
+
+train |>
+  group_by(is_batter_lefty, is_pitcher_lefty) |>
+  summarize(
+    mean = mean(is_home_run),
+    n = n()
+  )
+```
+
+Righty batters are more likely to hit homeruns.
+Righty pitchers are more likely to throw homeruns.
+
+```{r}
+train |>
+  pivot_longer(cols = inning:strikes, names_to = "term", values_to = "val") |>
+  summarize_hr(term, val) |>
+  ggplot(aes(val, mean)) +
+  geom_col() +
+  geom_hline(yintercept = 0.0529, color = "red") +
+  facet_grid(rows = vars(term), scales = "free")
+```
+
+Clear decrease when there are more outs and strikes.
+Increase when there are more balls.
+Some slight pattern on innings.
+
+```{r}
+train |>
+  summarize_hr(month(game_date)) |>
+  rename(month = `month(game_date)`) |>
+  ggplot(aes(month, mean)) +
+  geom_col()
+```
+
+```{r}
+train |>
+  mutate(is_home = home_team == batter_team) |>
+  summarize_hr(is_home)
+
+train |>
+  mutate(home = home_team == batter_team) |>
+  chisq_test(is_home_run ~ home)
+```
+
+Being the home team seems to help a little in the number of home runs
+
+
+Huge spike in October
+
+# Players
+
+```{r}
+batters <- train |>
+  summarize_hr(batter_name, batter_id)
+
+batters |>
+  ggplot(aes(n)) +
+  geom_density()
+
+batters |>
+  ggplot(aes(mean)) +
+  geom_density()
+
+batters |>
+  filter(mean < 0.25) |>
+  ggplot(aes(n, mean)) +
+  geom_point() +
+  geom_smooth()
+
+batters |>
+  filter(n > 50) |>
+  arrange(-mean)
+
+pitchers <- train |>
+  summarize_hr(pitcher_name, pitcher_id)
+
+pitchers |>
+  ggplot(aes(n)) +
+  geom_density()
+
+pitchers |>
+  ggplot(aes(mean)) +
+  geom_density()
+
+pitchers |>
+  filter(mean < 0.5) |>
+  ggplot(aes(n, mean)) +
+  geom_point() +
+  geom_smooth()
+
+pitchers |>
+  filter(n > 50) |>
+  arrange(-mean)
+```
+
+# Parks
+
+```{r}
+library(broom)
+train |>
+  summarize_hr(NAME) |>
+  arrange(-mean)
+
+aov(is_home_run ~ Cover, data = train) |>
+  summary()
+
+train |>
+  pivot_longer(ends_with("Dim")) |>
+  ggplot(aes(value)) +
+  geom_density(aes(fill = is_home_run), alpha = 0.5) +
+  facet_grid(rows = vars(name), scales = "free")
+
+
+train |>
+  pivot_longer(ends_with("W")) |>
+  ggplot(aes(value)) +
+  geom_density(aes(fill = is_home_run), alpha = 0.5) +
+  facet_grid(rows = vars(name), scales = "free")
+```

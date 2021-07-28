@@ -10,7 +10,7 @@ library(corrr)
 ```{r}
 set.seed(80085)
 
-df <- read_csv("2021-07/train.csv") %>%
+df <- read_csv("train.csv") %>%
   mutate(
     target_carbon_monoxide = log1p(target_carbon_monoxide),
     target_benzene = log1p(target_benzene),
@@ -28,6 +28,15 @@ grid_control <- control_grid(
   verbose = TRUE
 )
 ```
+
+```{r}
+train |> 
+  pivot_longer(-date_time, names_to = "term", values_to = "val") |> 
+  ggplot(aes(date_time, val)) +
+  geom_line() +
+  facet_grid(rows = vars(term), scales = "free_y")
+```
+
 
 ```{r}
 ts_train <- train |>
@@ -215,12 +224,18 @@ ben_tune <- ben_workflow |>
 ```
 
 ```{r}
-ben_tune |> 
+load("res.RData")
+
+nitrogen_tune |> 
   collect_metrics() |> 
   arrange(mean)
 
-autoplot(ben_tune)
+autoplot(nitrogen_tune)
 ```
+
+* Benzene: 0.0885
+* Carbon: 0.121
+* Nitrogen: 0.310
 
 
 ```{r}
@@ -231,10 +246,13 @@ ben_workflow %>%
   with(rmse_vec(.pred, target_benzene))
 ```
 
+* Benzene: 0.084
+* Carbon: 0.117
+* Nitrogen: 0.297
 
 
 
 ```{r}
-holdout <- read_csv("2021-07/test.csv")
+holdout <- read_csv("test.csv")
 holdout
 ```
