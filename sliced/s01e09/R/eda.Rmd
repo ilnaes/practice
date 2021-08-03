@@ -29,6 +29,14 @@ parks <- read_csv(here("data", "park_dimensions.csv")) |>
 df <- read_csv(here("data", "train.csv")) |>
   mutate(is_home_run = as.logical(is_home_run)) |>
   left_join(parks, by = "park")
+
+df |> 
+  mutate(na = is.na(launch_speed)) |> 
+  chisq_test(is_home_run ~ na)
+
+df |> 
+  group_by(is.na(launch_angle)) |> 
+  summarize(mean(is_home_run))
 ```
 
 

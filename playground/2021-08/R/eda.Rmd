@@ -1,0 +1,56 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(here)
+library(corrr)
+```
+
+```{r}
+df <- read_csv(here("data", "train.csv"))
+```
+
+```{r}
+set.seed(2981)
+
+split <- initial_split(df, strata = "loss")
+train <- training(split) |> 
+  select(-id)
+```
+
+```{r}
+train |>
+  ggplot(aes(loss)) +
+  geom_histogram()
+```
+
+Loss is integer (possible poisson?)
+
+```{r}
+glimpse(train)
+```
+
+Integers: f1, f55, f86 (all with negatives)
+
+```{r}
+train |>
+  select(f1, f55, f86) |>
+  map(n_distinct)
+```
+
+All pretty high categoricals (if categorical)
+
+```{r}
+min_max <- train |>
+  imap(\(x, y) tibble(term = y, min = min(x), max = max(x))) |>
+  bind_rows()
+
+min_max |>
+  filter(min >= 0, str_detect(term, "f"))
+```
+
+```{r}
+train |> 
+  sample_n(10000) |> 
+  correlate(method = "spearman")
+```
