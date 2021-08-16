@@ -1,4 +1,235 @@
-```{r}
+Numeric:
 
+* age_upon_outcome: age of the animal when the outcome was determined
+
+NEED TO PARSE
+
+Categorical:
+
+* animal_type: cat, dog, or ... something else
+* breed: breed of the animal
+* color: color of the animal
+* sex: sex of the animal
+* spay_neuter: whether the animal was spayed or neutered: intact or fixed
+
+- Idea: Mix in breed, possible one hot
+
+Datetime:
+
+* date_of_birth: date of birth of the animal
+* datetime: date and time when the outcome was determined
+
+- Idea: Time of year during datetime
+
+String:
+
+* name: name of the animal
+
+name has asterisk
+
+Target:
+* outcome_type: there are three possible outcomes: adoption, transfer, no outcome (euthanized, died); not present in test.csv
+
+(Class preds)
+
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(tidytext)
+library(lubridate)
+library(here)
+library(skimr)
+library(infer)
 ```
+
+```{r}
+df <- read_csv(here("data", "train.csv"))
+```
+
+```{r}
+set.seed(2021)
+split <- initial_split(df)
+
+train <- training(split)
+```
+
+```{r}
+skim(train)
+```
+
+### Animal type and breed
+
+```{r}
+train |> 
+  count(animal_type)
+```
+
+```{r}
+train |> 
+  select(breed)
+```
+
+```{r}
+train_breeds <- train |> 
+  mutate(mix = str_detect(breed, "Mix"),
+         breed = str_match(breed, "^(.*?)( Mix)?$")[,2]) |> 
+  unnest_tokens(breed, breed, token = "regex", pattern = "/")
+```
+
+```{r}
+train_breeds |> 
+  count(breed) |> 
+  arrange(-n) |> 
+  mutate(cumsum = cumsum(n)/(sum(n))) |> 
+  filter(cumsum < 0.75)
+```
+
+```{r}
+train_breeds |> 
+  unite(breed, c("animal_type", "breed"), sep='-') |> 
+  mutate(breed = fct_lump_n(breed, n = 15)) |> 
+  group_by(breed, outcome_type) |> 
+  count() |> 
+  ungroup(outcome_type) |> 
+  mutate(n = n/(sum(n))) |> 
+  ggplot(aes(n, outcome_type)) +
+  geom_col() +
+  facet_wrap(~breed)
+```
+
+Breeds matter and type definitely matters
+
+```{r}
+train_breeds |> 
+  distinct(breed, animal_type) |> 
+  count(breed) |> 
+  arrange(-n)
+```
+
+```{r}
+train_breeds |>
+  filter(animal_type == "Other") |> 
+  count(breed) |> 
+  arrange(-n)
+
+train_breeds |> 
+  filter(animal_type == "Dog") |> 
+  mutate(breed = fct_lump_n(breed, n = 15)) |> 
+  group_by(breed, outcome_type) |> 
+  count() |> 
+  ungroup(outcome_type) |> 
+  mutate(n = n/(sum(n))) |> 
+  ggplot(aes(n, outcome_type)) +
+  geom_col() +
+  facet_wrap(~breed)
+```
+
+* Dog breeds don't seem to matter much
+* Cat breeds do
+
+
+### Age
+
+```{r}
+train_age <- train |>
+  separate(age_upon_outcome, c("age_num", "age_type"), sep = " ") |>
+  mutate(
+    age_num = as.integer(age_num),
+    age_type = case_when(
+      str_detect(age_type, "month") ~ 1 / 12,
+      str_detect(age_type, "years") ~ 1,
+      str_detect(age_type, "day") ~ 1 / 365,
+      TRUE ~ 0
+    ),
+    age = age_num * age_type
+  ) |> 
+  select(-age_num, -age_type, -date_of_birth)
+```
+
+```{r}
+train_age |> 
+  filter(animal_type %in% c("Dog", "Cat")) |> 
+  ggplot(aes(age)) +
+  geom_density(aes(color = outcome_type)) +
+  facet_grid(rows = vars(animal_type), scales = "free")
+```
+
+
+### Sex, Spay
+
+```{r}
+train |> 
+  group_by(sex, animal_type, outcome_type) |> 
+  count() |> 
+  ungroup(outcome_type) |> 
+  mutate(p = n / sum(n)) |> 
+  ggplot(aes(p, outcome_type)) +
+  geom_col(aes(fill = sex), position = "dodge") +
+  facet_wrap(~animal_type)
+```
+
+```{r}
+train |> 
+  ggplot(aes(sex)) +
+  geom_bar(aes(fill = outcome_type), position = 'fill') +
+  facet_wrap(~animal_type)
+```
+
+
+```{r}
+train |> 
+  mutate(mix = str_detect(breed, "Mix")) |> 
+  ggplot(aes(mix)) +
+  geom_bar(aes(fill = outcome_type), position = 'fill') +
+  facet_wrap(~animal_type)
+```
+
+
+People like female birds? and known sex other
+
+```{r}
+train |> 
+  ggplot(aes(spay_neuter)) +
+  geom_bar(aes(fill = outcome_type), position = 'fill') +
+  facet_wrap(~animal_type)
+```
+
+People like fixed animals, especially for cats
+
+```{r}
+View(train)
+```
+
+```{r}
+train |> 
+  mutate(mix = str_detect(breed, "Mix")) |> 
+  group_by(mix, outcome_type, animal_type) |> 
+  count() |> 
+  ungroup(outcome_type) |> 
+  mutate(p = n / sum(n)) |> 
+  ggplot(aes(p, outcome_type)) +
+  geom_col(aes(fill = mix), position = "dodge") +
+  facet_wrap(~animal_type, scales = 'free_x')
+```
+
+```{r}
+train |> 
+  filter(animal_type %in% c("Bird", "Cat", "Dog", "Other")) |> 
+  mutate(month = month(datetime)) |> 
+  group_by(animal_type, month, outcome_type) |> 
+  count() |> 
+  ungroup(outcome_type) |> 
+  mutate(p = n/sum(n)) |> 
+  ggplot(aes(month, p)) +
+  geom_col() +
+  facet_grid(rows=vars(animal_type), cols = vars(outcome_type), scales='free')
+```
+
+
+
+
+
+
+
 

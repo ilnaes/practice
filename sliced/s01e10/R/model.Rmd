@@ -1,0 +1,105 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(tidytext)
+library(textrecipes)
+library(lubridate)
+library(here)
+library(skimr)
+```
+
+```{r}
+df <- read_csv(here("data", "train.csv")) |>
+  mutate(outcome_type = as_factor(outcome_type))
+holdout <- read_csv(here("data", "test.csv"))
+```
+
+```{r}
+set.seed(2021)
+split <- initial_split(df)
+
+train <- training(split)
+test <- testing(split)
+
+folds <- vfold_cv(train, strata = "outcome_type", v = 5)
+mset <- metric_set(mn_log_loss)
+controls <- control_grid(
+  verbose = TRUE,
+  save_pred = TRUE,
+  save_workflow = TRUE,
+)
+```
+
+```{r}
+train |>
+  slice(8565:n()) |>
+  mutate(
+    age = str_match_all(age_upon_outcome, "^(\\d+) (\\w+?)s?$"),
+    age_num = map_dbl(age, \(x) ifelse(nrow(x) == 1, strtoi(x[, 2]), NA)),
+    age_type = map_chr(age, \(x) ifelse(nrow(x) == 1, x[, 3], "NA"))
+  ) |>
+  select(starts_with("age"))
+```
+
+```{r}
+train |>
+  mutate(age = as.Date(datetime) - date_of_birth) |>
+  select(age) |>
+  mutate(age = as.period(age) / days(30))
+```
+
+
+
+
+```{r}
+train |>
+  select(age_upon_outcome) |>
+  mutate(age = str_match_all(age_upon_outcome, "^(\\d+) (\\w+?)s?$"))
+```
+
+
+```{r}
+rec <- recipe(outcome_type ~ ., data = train) |>
+  step_mutate(
+    age = as.numeric(as.Date(datetime) - date_of_birth),
+    mix = str_detect(breed, "Mix"),
+    breed = str_match(breed, "^(.*?)( Mix)?$")[, 2],
+    week = week(datetime),
+    day = wday(datetime),
+  ) |>
+  step_tokenize(breed, token = "regex", options = list(pattern = "/")) |>
+  step_tokenfilter(breed, max_tokens = 5) |>
+  step_tf(breed) |>
+  step_rm(age_upon_outcome, date_of_birth, datetime, name, color, id) |>
+  step_dummy(all_nominal_predictors())
+```
+
+```{r}
+rec |>
+  prep() |>
+  juice()
+```
+
+```{r}
+model <- boost_tree(
+  mtry = tune(),
+  trees = 1000,
+  learn_rate = tune(),
+  stop_iter = tune()
+) |>
+  set_engine("xgboost", validation = 0.2) |>
+  set_mode("classification")
+
+wkflw <- workflow(rec, model)
+```
+
+```{r}
+res <- wkflw |>
+  tune_grid(folds, metrics = mset, control = controls, grid = crossing(
+    # max_tokens = 20,
+    learn_rate = 0.1,
+    mtry = 3,
+    stop_iter = 20,
+    # trees = seq(200, 800, 200)
+  ))
+```
