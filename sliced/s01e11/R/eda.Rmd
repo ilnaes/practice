@@ -41,7 +41,9 @@ library(tidytext)
 ```{r}
 set.seed(2021)
 
-df <- read_csv(here('data', 'train.csv'))
+df <- read_csv(here('data', 'train.csv')) |> 
+  mutate(price_num = parse_number(priceRange),
+         hi = price_num > 400000)
 split <- initial_split(df, strata = "priceRange")
 
 train <- training(split)
@@ -53,7 +55,7 @@ skim(train)
 
 ```{r}
 train |> 
-  count(priceRange)
+  count(hi)
 ```
 
 ```{r}
@@ -170,7 +172,23 @@ train |>
 Definite predictability.
 
 ```{r}
+library(stopwords)
 
+train |> 
+  unnest_tokens(word, description) |> 
+  anti_join(stop_words) |> 
+  group_by(word, hi) |> 
+  count() |> 
+  filter(n >= 100) |> 
+  ungroup(hi) |> 
+  mutate(p = (n + 1)/(sum(n) + 1)) |> 
+  filter(hi) |> 
+  arrange(-p) |> 
+  View()
+
+train |> 
+  filter(str_detect(description, "2016")) |> 
+  select(description, priceRange)
 ```
 
 

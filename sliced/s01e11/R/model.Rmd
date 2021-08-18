@@ -1,6 +1,11 @@
+* xgboost on numerical (done)
+* KNN on location
+* LASSO on description
+
 ```{r}
 library(tidyverse)
 library(tidymodels)
+library(stacks)
 library(skimr)
 library(here)
 library(tidytext)
@@ -29,25 +34,31 @@ controls <- control_grid(
 ```
 
 ```{r}
-center <- train |> 
-  filter(priceRange == "650000+") |> 
-  select(longitude, latitude) |> 
-  summarize(x = mean(longitude),
-            y = mean(latitude)) |> 
+center <- train |>
+  filter(priceRange == "650000+") |>
+  select(longitude, latitude) |>
+  summarize(
+    x = mean(longitude),
+    y = mean(latitude)
+  ) |>
   unlist()
 
-num_rec <- recipe(priceRange ~ ., data = train) |> 
-  step_rm(description) |> 
-  update_role(uid, new_role = "ID") |> 
-  step_nzv(all_predictors()) |> 
-  step_mutate(dist = (longitude - center["x"])^2 + (latitude - center["y"])^2) |> 
+num_rec <- recipe(priceRange ~ ., data = train) |>
+  step_rm(description) |>
+  update_role(uid, new_role = "ID") |>
+  step_nzv(all_predictors()) |>
+  step_mutate(dist = (longitude - center["x"])^2 + (latitude - center["y"])^2) |>
   step_dummy(all_nominal_predictors())
 ```
 
 ```{r}
 xg_model <- boost_tree("classification") |>
-  update(mtry = tune(),
-         trees = tune())
+  update(
+    mtry = tune(),
+    learn_rate = tune(),
+    trees = 1500,
+    stop_iter = 50,
+  )
 
 xg_wf <- workflow(num_rec, xg_model)
 ```
@@ -55,9 +66,67 @@ xg_wf <- workflow(num_rec, xg_model)
 ```{r}
 res <- xg_wf |>
   tune_grid(folds, control = controls, metrics = mset, grid = crossing(
-    mtry = 3,
-    trees = 200
+    mtry = c(2, 3, 4),
+    learn_rate = 10^seq(-3,-1,length.out = 5),
   ))
 ```
+
+```{r}
+res <- readRDS(here("res.RDS"))
+```
+
+```{r}
+autoplot(res)
+```
+
+```{r}
+fitted <- xg_wf |> 
+  finalize_workflow(select_best(res)) |> 
+  fit(train)
+
+fitted |> 
+  extract_fit_parsnip() |> 
+  vip()
+```
+
+
+```{r}
+preds <- fitted |> 
+  augment(test)
+
+preds |> 
+  mn_log_loss(priceRange, `.pred_650000+`:`.pred_250000-350000`)
+
+fitted |> 
+  augment(holdout) |> 
+  select(uid, `.pred_650000+`:`.pred_250000-350000`) |> 
+  write_csv("attempt1.csv")
+```
+
+0.912
+
+```{r}
+knn_res <- readRDS(here('knn_res.RDS'))
+
+autoplot(knn_res) +
+  ylim(0,2.5)
+```
+
+```{r}
+lm_res <- readRDS(here('lm_res.RDS'))
+
+autoplot(lm_res)
+```
+
+```{r}
+st <- stacks() |> 
+  add_candidates(res) |> 
+  add_candidates(knn_res) |>
+  add_candidates(lm_res)
+
+st |> 
+  blend_predictions()
+```
+
 
 
