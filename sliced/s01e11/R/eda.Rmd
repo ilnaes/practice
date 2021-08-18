@@ -1,0 +1,177 @@
+* uid: A unique identifier for the Zillow property.
+
+Text:
+
+* description: The description of the listing from Zillow.
+
+Categorical:
+
+* city: The lowercase name of a city or town in or surrounding Austin, Texas.
+* homeType: The home type (i.e., Single Family, Townhouse, Apartment).
+* hasSpa: Boolean indicating if the home has a Spa.
+
+Date:
+
+* yearBuilt: The year the property was built.
+
+Numeric:
+
+* latitude: Latitude of the listing.
+* longitude: Longitude of the listing.
+* garageSpaces: Number of garage spaces.
+* numOfPatioAndPorchFeatures: The number of unique patio and/or porch features in the Zillow listing.
+* lotSizeSqFt: The lot size of the property reported in Square Feet. This includes the living area.
+* avgSchoolRating: The average school rating of all school types (i.e., Middle, High) in the Zillow listing.
+* MedianStudentsPerTeacher: The median students per teacher for all schools in the Zillow listing.
+* numOfBathrooms: The number of bathrooms in a property.
+* numOfBedrooms: The number of bedrooms in a property.
+
+Target:
+
+* priceRange: The most recent available price at time of data acquisition, binned into price ranges.
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(here)
+library(tidytext)
+```
+
+```{r}
+set.seed(2021)
+
+df <- read_csv(here('data', 'train.csv'))
+split <- initial_split(df, strata = "priceRange")
+
+train <- training(split)
+```
+
+```{r}
+skim(train)
+```
+
+```{r}
+train |> 
+  count(priceRange)
+```
+
+```{r}
+plot_prices <- function(df, ...) {
+  df |> 
+    ggplot(aes(...)) +
+    geom_bar(aes(fill = priceRange), position = "fill") +
+    coord_flip()
+}
+
+plot_price_curves <- function(df, ...) {
+  df |> 
+    ggplot(aes(...)) +
+    geom_density(aes(color = priceRange))
+}
+```
+
+### Categorical
+
+```{r}
+train |> 
+  plot_prices(homeType)
+
+train |> 
+  count(homeType)
+```
+
+Condo and single family are most (and single family is far away the most)
+
+```{r}
+train |> 
+  plot_prices(city)
+
+train |> 
+  count(city)
+```
+
+Prices really depend on city, but all cities have very few listings besides Austin
+
+```{r}
+train |> 
+  count(hasSpa)
+
+train |> 
+  plot_prices(hasSpa)
+```
+
+Spas are also predictive
+
+### Numeric
+
+```{r}
+train |> 
+  filter(lotSizeSqFt < 20000) |> 
+  plot_price_curves(lotSizeSqFt)
+
+train |> 
+  filter(lotSizeSqFt < 20000) |> 
+  ggplot(aes(lotSizeSqFt, numOfBedrooms)) +
+  geom_jitter(aes(color = priceRange), alpha = 0.5) +
+  scale_y_continuous(breaks = 1:10)
+```
+
+```{r}
+train |>  
+  plot_price_curves(yearBuilt)
+```
+
+There are cheap houses that were build in the 1980s
+
+```{r}
+ggplot(train, aes(numOfBedrooms, numOfBathrooms)) +
+  geom_jitter(aes(color = priceRange))
+```
+
+No surprises, number of rooms correlates positively with price
+
+```{r}
+ggplot(train, aes(longitude, latitude)) +
+  geom_point(aes(color = priceRange), alpha = 0.5) +
+  geom_point(aes(x = center['x'], y = center['y']), color = "red")
+
+ggplot(train, aes(longitude, latitude)) +
+  geom_point(aes(color = city))
+```
+
+Price looks concentric.  Maybe add a distance to center?
+
+```{r}
+center <- train |> 
+  filter(priceRange == "650000+") |> 
+  select(longitude, latitude) |> 
+  summarize(x = mean(longitude),
+            y = mean(latitude)) |> 
+  unlist()
+
+train |> 
+  mutate(dist = (longitude - center["x"])^2 + (latitude - center['y'])^2) |> 
+  plot_price_curves(dist)
+```
+
+Looks reasonable.
+
+```{r}
+ggplot(train, aes(MedianStudentsPerTeacher, avgSchoolRating)) +
+  geom_jitter(aes(color = priceRange), alpha = 0.5)
+
+train |> 
+  mutate(weird = (priceRange == "650000+") & (avgSchoolRating < 5)) |> 
+  ggplot(aes(longitude, latitude)) +
+  geom_point(aes(color = weird), alpha = 0.5)
+```
+
+Definite predictability.
+
+```{r}
+
+```
+
+
+

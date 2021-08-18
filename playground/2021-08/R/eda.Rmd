@@ -49,8 +49,71 @@ min_max |>
   filter(min >= 0, str_detect(term, "f"))
 ```
 
+### Correlations
+
 ```{r}
-train |> 
+cors <- train |> 
   sample_n(10000) |> 
   correlate(method = "spearman")
+
+cors |> 
+  write_csv(here("corrs.csv"))
+
+cors <- 
+  read_csv(here('corrs.csv'))
 ```
+
+```{r}
+cors |> 
+  select(loss, term) |> 
+  arrange(-loss) |> 
+  ggplot(aes(loss)) +
+  geom_density()
+```
+
+Very weak correlations.
+
+```{r}
+train |> 
+  sample_n(1000) |> 
+  ggplot(aes(f70, loss)) +
+  geom_point(aes(alpha = 0.3))
+```
+
+Visually, we don't get anything between loss and the predictor with the highest correlation.
+
+### PCA
+
+```{r}
+sampled <- train |>
+  sample_n(10000) |> 
+  map(\(x) (x - mean(x))/sd(x)) |> 
+  bind_cols()
+
+pca_res <- sampled |> 
+  select(-loss) |> 
+  prcomp()
+
+pca_res$sdev
+
+pca_df <- tibble(
+  term = 1:100,
+  var = pca_res$sdev^2/(sum(pca_res$sdev^2))
+)
+
+pca_df |> 
+  slice(1:15) |> 
+  ggplot(aes(term, var, group=1)) +
+  geom_line() +
+  ylim(0, 0.014) +
+  scale_x_continuous(breaks = 1:15)
+```
+
+```{r}
+library(pls)
+
+res <- plsr(loss ~ ., data = sampled)
+
+summary(res)
+```
+

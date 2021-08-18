@@ -226,6 +226,16 @@ train |>
   facet_grid(rows=vars(animal_type), cols = vars(outcome_type), scales='free')
 ```
 
+```{r}
+train |> 
+  filter(animal_type %in% c("Bird", "Cat", "Dog", "Other")) |> 
+  mutate(aster = str_detect(name, "\\*")) |> 
+  ggplot(aes(aster)) +
+  geom_bar(aes(fill = outcome_type), position = "fill") +
+  facet_wrap(~animal_type)
+```
+
+
 
 
 

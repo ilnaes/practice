@@ -6,6 +6,7 @@ library(textrecipes)
 library(lubridate)
 library(here)
 library(skimr)
+library(finetune)
 ```
 
 ```{r}
@@ -61,6 +62,7 @@ train |>
 ```{r}
 rec <- recipe(outcome_type ~ ., data = train) |>
   step_mutate(
+    aster = str_detect(name, "\\*"),
     age = as.numeric(as.Date(datetime) - date_of_birth),
     mix = str_detect(breed, "Mix"),
     breed = str_match(breed, "^(.*?)( Mix)?$")[, 2],
@@ -68,7 +70,7 @@ rec <- recipe(outcome_type ~ ., data = train) |>
     day = wday(datetime),
   ) |>
   step_tokenize(breed, token = "regex", options = list(pattern = "/")) |>
-  step_tokenfilter(breed, max_tokens = 5) |>
+  step_tokenfilter(breed, max_tokens = tune()) |>
   step_tf(breed) |>
   step_rm(age_upon_outcome, date_of_birth, datetime, name, color, id) |>
   step_dummy(all_nominal_predictors())
@@ -82,15 +84,26 @@ rec |>
 
 ```{r}
 model <- boost_tree(
+  trees = 1500,
+  stop_iter = 50,
   mtry = tune(),
-  trees = 1000,
-  learn_rate = tune(),
-  stop_iter = tune()
+  learn_rate = tune()
 ) |>
   set_engine("xgboost", validation = 0.2) |>
   set_mode("classification")
 
 wkflw <- workflow(rec, model)
+```
+
+```{r}
+race_controls <- control_race(verbose = TRUE, verbose_elim = TRUE)
+
+res <- wkflw |>
+  tune_race_anova(folds, metrics = mset, controls = race_controls, grid = crossing(
+    max_tokens = c(30, 40, 50),
+    learn_rate = 10^seq(-2, -1, length.out = 5),
+    mtry = c(12, 15, 18),
+  ))
 ```
 
 ```{r}
@@ -102,4 +115,39 @@ res <- wkflw |>
     stop_iter = 20,
     # trees = seq(200, 800, 200)
   ))
+```
+
+```{r}
+res <- readRDS("res.RDS")
+```
+
+```{r}
+res |>
+  autoplot()
+```
+
+```{r}
+res |>
+  plot_race()
+```
+
+
+```{r}
+fitted <- wkflw |>
+  finalize_workflow(select_best(res)) |>
+  fit(train)
+```
+
+```{r}
+preds <- fitted |>
+  augment(holdout)
+
+preds |>
+  select(id, starts_with(".pred"), -.pred_class) |>
+  rename(
+    adoption = .pred_adoption,
+    `no outcome` = `.pred_no outcome`,
+    transfer = .pred_transfer
+  ) |>
+  write_csv("attempt2.csv")
 ```

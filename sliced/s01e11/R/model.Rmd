@@ -1,0 +1,63 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+library(here)
+library(tidytext)
+library(treesnip)
+library(vip)
+```
+
+```{r}
+set.seed(2021)
+
+df <- read_csv(here("data", "train.csv")) |>
+  mutate(priceRange = as_factor(priceRange))
+holdout <- read_csv(here("data", "test.csv"))
+
+split <- initial_split(df, strata = "priceRange")
+train <- training(split)
+test <- testing(split)
+
+folds <- vfold_cv(train, v = 5)
+mset <- metric_set(mn_log_loss)
+controls <- control_grid(
+  verbose = TRUE,
+  save_pred = TRUE,
+  save_workflow = TRUE,
+)
+```
+
+```{r}
+center <- train |> 
+  filter(priceRange == "650000+") |> 
+  select(longitude, latitude) |> 
+  summarize(x = mean(longitude),
+            y = mean(latitude)) |> 
+  unlist()
+
+num_rec <- recipe(priceRange ~ ., data = train) |> 
+  step_rm(description) |> 
+  update_role(uid, new_role = "ID") |> 
+  step_nzv(all_predictors()) |> 
+  step_mutate(dist = (longitude - center["x"])^2 + (latitude - center["y"])^2) |> 
+  step_dummy(all_nominal_predictors())
+```
+
+```{r}
+xg_model <- boost_tree("classification") |>
+  update(mtry = tune(),
+         trees = tune())
+
+xg_wf <- workflow(num_rec, xg_model)
+```
+
+```{r}
+res <- xg_wf |>
+  tune_grid(folds, control = controls, metrics = mset, grid = crossing(
+    mtry = 3,
+    trees = 200
+  ))
+```
+
+

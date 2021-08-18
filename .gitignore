@@ -4,6 +4,8 @@
 *.RData
 *.rds
 
+catboost_info
+
 tags
 
 # History files
