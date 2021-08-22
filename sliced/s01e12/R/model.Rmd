@@ -1,0 +1,126 @@
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(here)
+library(skimr)
+library(treesnip)
+library(finetune)
+```
+
+```{r}
+preprocess <- function(df) {
+  df |>
+    mutate(Sector = as_factor(Sector),
+           City = as_factor(City),
+           State = as_factor(State),
+           Bank = as_factor(Bank),
+           BankState = as_factor(BankState),
+           FranchiseCode = as_factor(if_else(FranchiseCode <= 1, 0, FranchiseCode)),
+           NAICS = as_factor(NAICS),
+           UrbanRural = as_factor(UrbanRural),
+    )
+}
+
+df <- read_csv(here('data', 'train.csv')) |> preprocess()
+holdout <- read_csv(here('data', 'test.csv')) |> preprocess()
+```
+
+```{r}
+set.seed(2021)
+split <- initial_split(df, strata = "default_amount")
+train <- training(split)
+test <- testing(split)
+folds <- vfold_cv(train, v = 5)
+
+mset <- metric_set(mae)
+controls <- control_grid(verbose = TRUE, save_pred = TRUE)
+race_controls <- control_race(verbose = TRUE, verbose_elim = TRUE)
+```
+
+```{r}
+null_rec <- recipe(default_amount ~ ., data = train)
+null_model <- null_model(mode = "regression")
+null_wk <- workflow(null_rec, null_model)
+
+null_res <- null_wk |>
+  fit(train)
+
+null_res |>
+  augment(test) |>
+  mae(default_amount, .pred)
+```
+
+Null model MAE: 23353
+
+```{r}
+cb_rec <- recipe(default_amount ~ ., data = train) |>
+  step_rm(LoanNr_ChkDgt, Name, Zip, City) |>
+  step_mutate(
+    home = State == BankState,
+    ratio = GrAppv/SBA_Appv,
+    recession = ApprovalFY %in% c(2005, 2006, 2007, 2008),
+  )
+
+cb_rec |>
+  prep() |>
+  juice()
+```
+
+```{r}
+cb_model <- boost_tree(
+  mode = "regression",
+  tree_depth = tune(),
+  trees = tune(),
+  mtry = tune(),
+  learn_rate = tune(),
+) |>
+  set_engine("catboost", loss_function = "MAE", one_hot_max_size = 0)
+
+cb_wf <- workflow(cb_rec, cb_model)
+```
+
+```{r}
+doParallel::registerDoParallel(cores = 4)
+cb_res <- cb_wf |>
+  tune_race_anova(folds, metrics = mset, control = race_controls, grid = crossing(
+    learn_rate = 0.1,
+    # mtry = 9,
+    # trees = 600,
+    tree_depth = c(5,6,7),
+    mtry = c(11,13,15, 17),
+    trees = seq(200, 1000, 100),
+  ))
+
+saveRDS(cb_res, here('cb_res.RDS'))
+
+collect_metrics(cb_res) |>
+  arrange(mean)
+```
+
+```{r}
+cb_fitted <- cb_wf |>
+  finalize_workflow(select_best(cb_res, "mae")) |>
+  fit(train)
+
+cb_fitted |>
+  augment(test) |>
+  mutate(.pred = if_else(.pred < 0, 0, .pred)) |> 
+  mae(default_amount, .pred)
+
+saveRDS(cb_fitted, here('cb_fitted.RDS'))
+```
+
+* Slightly tuned: 14242
+* Added features: 14146
+* More tuned: 14221
+
+```{r}
+preds <- cb_fitted |>
+  augment(holdout) |>
+  select(LoanNr_ChkDgt, default_amount = .pred)
+
+preds |>
+  mutate(default_amount = if_else(default_amount < 0, 0, default_amount)) |>
+  write_csv(here('attempt2.csv'))
+```
+
